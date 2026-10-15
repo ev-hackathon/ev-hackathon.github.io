@@ -1,0 +1,10 @@
+streamlit>=1.50
+streamlit-folium>=0.25
+folium>=0.17
+altair>=5.0
+pandas>=2.0
+numpy>=1.26
+requests>=2.31
+python-dotenv>=1.0
+flask>=3.0
+pytest>=8.0

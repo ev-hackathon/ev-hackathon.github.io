@@ -1,0 +1,26 @@
+# 비밀값
+.env
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# 편집기 / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 로컬에서 쌓은 상태 기록 (GitHub Actions 기록은 history 브랜치에 따로 저장)
+data/history/
+
+# 실행 중 생기는 파일
+.public_url
+폰주소.txt
+server.log
+tunnel.log
+.pids
+tunnel_history.log
