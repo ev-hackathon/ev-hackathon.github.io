@@ -4,7 +4,7 @@
 피크 시간대 충전 수요를 **인근 유휴 거점으로 분산**하는 관제 서비스입니다.
 한국환경공단 전기차 충전기 공공 API를 쓰며, 충청북도 11개 시·군을 지원합니다.
 
-**공개 사이트: https://guligae158-lgtm.github.io/chungbuk-ev/** (GitHub Pages, 15분마다 실제 데이터로 갱신)
+**공개 사이트: https://chungbuk-ev.github.io/** (GitHub Pages, 15분마다 실제 데이터로 갱신)
 
 | | 공개 사이트 (GitHub Pages) | 로컬 서버 (`server.py`) | 대시보드 앱 (`main.py`) |
 |---|---|---|---|
