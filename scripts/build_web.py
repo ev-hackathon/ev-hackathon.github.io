@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 import config
+from utils import prices
 
 TEMPLATE = config.ROOT / "web" / "index.template.html"
 OUT = config.ROOT / "docs" / "index.html"
@@ -25,7 +26,9 @@ def build() -> str:
     for f in geo["features"]:
         f["geometry"]["coordinates"] = _round(f["geometry"]["coordinates"])
     geo_txt = json.dumps({"type": "FeatureCollection", "features": geo["features"]}, ensure_ascii=False, separators=(",", ":"))
-    body = TEMPLATE.read_text(encoding="utf-8").replace("/*__GEO__*/", geo_txt)
+    price_txt = json.dumps(prices.web_payload(), ensure_ascii=False, separators=(",", ":"))
+    body = (TEMPLATE.read_text(encoding="utf-8").replace("/*__GEO__*/", geo_txt)
+            .replace("/*__PRICES__*/", price_txt))
     head, rest = body.split("\n<header", 1)
     return ('<!doctype html>\n<html lang="ko">\n<head>\n<meta charset="utf-8">\n'
             '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'

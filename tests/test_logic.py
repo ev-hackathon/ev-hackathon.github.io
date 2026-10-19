@@ -18,7 +18,7 @@ def charger(stat_id, chger_id, ctype="04", stat="2", output="50", **kw):
 
 
 # ── 단건 규칙 ──────────────────────────────────────────────
-@pytest.mark.parametrize("kw,rate", [(7, 294.3), (30, 306.0), (49.9, 306.0), (50, 324.4), (100, 347.2), (350, 391.9)])
+@pytest.mark.parametrize("kw,rate", [(7, 295.0), (30, 307.2), (49.9, 307.2), (50, 325.6), (100, 348.4), (350, 393.1)])
 def test_base_rate_tiers(kw, rate):
     assert logic.base_rate_for_output(kw) == rate
 
@@ -76,8 +76,8 @@ def test_station_summary_prices_fast_and_slow_separately():
     st = logic.summarize_stations(logic.prepare_chargers(rows), config.DEFAULT_POLICY, NOON).iloc[0]
     assert (st["total"], st["fast_total"], st["slow_total"], st["fault"]) == (4, 2, 2, 1)
     assert st["fast_status"] == "혼잡" and st["slow_status"] == "여유"
-    assert st["fast_price"] == pytest.approx(round(347.2 * 1.15, 1))
-    assert st["slow_price"] == pytest.approx(round(294.3 * 0.80, 1))
+    assert st["fast_price"] == pytest.approx(round(348.4 * 1.15, 1))
+    assert st["slow_price"] == pytest.approx(round(295.0 * 0.80, 1))
     assert st["status"] == "보통"          # 전체: 대기 1 / 사용가능 3
     assert st["price"] == st["fast_price"]  # 대표 단가는 급속 우선
 
@@ -93,7 +93,7 @@ def test_policy_variables_change_price():
     ch = logic.prepare_chargers(rows)
     p1 = logic.summarize_stations(ch, PricingPolicy(discount_rate=0.1), NOON).iloc[0]["price"]
     p2 = logic.summarize_stations(ch, PricingPolicy(discount_rate=0.3), NOON).iloc[0]["price"]
-    assert p1 == pytest.approx(324.4 * 0.9, abs=0.05) and p2 == pytest.approx(324.4 * 0.7, abs=0.05)
+    assert p1 == pytest.approx(325.6 * 0.9, abs=0.05) and p2 == pytest.approx(325.6 * 0.7, abs=0.05)
 
 
 # ── 대체 거점 추천 ────────────────────────────────────────
@@ -167,4 +167,4 @@ def test_fast_seekers_are_not_sent_to_slow_only_station():
     st = logic.summarize_stations(logic.prepare_chargers(rows), config.DEFAULT_POLICY, NOON)
     r = logic.recommend_alternatives(st, radius_km=3).set_index("statId").loc["BUSY"]
     assert r["alt_statId"] == "FAST" and r["alt_speed"] == "급속"
-    assert r["alt_price"] == pytest.approx(round(324.4 * 0.8, 1))
+    assert r["alt_price"] == pytest.approx(round(325.6 * 0.8, 1))

@@ -13,6 +13,7 @@ import pandas as pd
 
 import config
 from config import PricingPolicy
+from utils import prices
 
 KST = timezone(timedelta(hours=9))
 SPEEDS = ("급속", "완속")
@@ -22,7 +23,7 @@ SPEEDS = ("급속", "완속")
 # 1. 단건 규칙 함수 (정책 변경 시 주로 여기를 수정)
 # ─────────────────────────────────────────────────────────────
 def base_rate_for_output(kw: float) -> float:
-    """충전기 출력(kW) 구간별 기본 단가(원/kWh)."""
+    """충전기 출력(kW) 구간별 공공 단가(원/kWh). 운영사 요금표에 없는 충전기의 기준값."""
     for upper, rate in config.BASE_RATE_TIERS:
         if kw < upper:
             return rate
@@ -102,7 +103,6 @@ def prepare_chargers(rows: list[dict], *, exclude_limited: bool = config.EXCLUDE
     df["chgerType"] = df["chgerType"].str.zfill(2).where(df["chgerType"] != "", "")
     df["speed"] = [classify_speed(t, o) for t, o in zip(df["chgerType"], df["output"])]
     df["output_kw"] = df["output"].where(df["output"] > 0, df["speed"].map(config.DEFAULT_OUTPUT_KW))
-    df["base_rate"] = df["output_kw"].map(base_rate_for_output)
 
     df["is_avail"] = df["stat"].isin(config.STAT_AVAILABLE)
     df["is_charging"] = df["stat"].isin(config.STAT_CHARGING)
@@ -113,6 +113,11 @@ def prepare_chargers(rows: list[dict], *, exclude_limited: bool = config.EXCLUDE
     df["parking"] = df["parkingFree"].str.upper().map({"Y": "무료", "N": "유료"}).fillna("현장확인")
     df["statNm"] = df["statNm"].replace("", "이름 없음")
     df["busiNm"] = df["busiNm"].replace("", "운영기관 미표기")
+    # 기본 단가 = 운영사의 실제 회원 단가(출력 구간별). 요금표에 없으면 공공 단가 (utils/prices.py)
+    found = [prices.lookup(b, kw) for b, kw in zip(df["busiNm"], df["output_kw"])]
+    df["base_rate"] = [f[0] for f in found]
+    df["price_src"] = [f[1] for f in found]
+    df["nonmember_rate"] = [prices.lookup(b, kw, member=False)[0] for b, kw in zip(df["busiNm"], df["output_kw"])]
     df["full_addr"] = (df["addr"] + " " + df["addrDetail"]).str.strip()
     return df.reset_index(drop=True)
 
