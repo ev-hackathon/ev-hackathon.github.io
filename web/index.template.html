@@ -75,7 +75,10 @@ button, input, select { font: inherit; color: inherit; }
 .map-tools button.fit { width: auto; padding: 0 6px; font-size: 13px; }
 .me-note { position: absolute; z-index: 1000; left: 12px; top: 46px; font-size: 13px; color: var(--ink); background: var(--surface);
            border: 1px solid var(--rule); padding: 6px 10px; border-radius: 4px; max-width: calc(100% - 110px); box-shadow: 0 1px 4px rgb(0 0 0 / 12%); }
+.me-note { display: flex; gap: 8px; align-items: flex-start; }
+.me-note[hidden] { display: none; }
 .me-note button { border: 0; background: none; padding: 0; color: var(--free); font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; }
+.me-note .me-close { flex: none; color: var(--ink-2); text-decoration: none; font-size: 18px; line-height: 1; padding: 0 2px; margin: -1px -4px 0 0; }
 .me-dot { width: 16px; height: 16px; margin: -8px 0 0 -8px; border-radius: 50%; background: #2a7de1; border: 3px solid #fff; box-shadow: 0 0 0 2px rgb(42 125 225 / 35%), 0 1px 4px rgb(0 0 0 / 35%); }
 .map-note { position: absolute; z-index: 1000; left: 12px; top: 10px; font-size: 12.5px; color: var(--ink-2); background: color-mix(in srgb, var(--surface) 88%, transparent);
             padding: 4px 8px; border-radius: 3px; max-width: calc(100% - 70px); }
@@ -1542,7 +1545,14 @@ document.getElementById("reload").addEventListener("click", () => loadLive(state
 // 브라우저 위치 권한으로 현재 위치를 찍고, 그 시·군으로 옮겨 가장 가까운 '여유' 충전소를 안내한다. 위치는 서버로 보내지 않는다.
 const meLayer = L.layerGroup().addTo(map);
 const meNote = document.getElementById("me-note");
-const showMe = html => { meNote.innerHTML = html; meNote.hidden = !html; };
+let meTimer = null;
+// 안내 창: 오른쪽 × 로 닫기. 오류·안내 문구는 6초 뒤 저절로 닫힘
+const showMe = (html, autoHide = false) => {
+  clearTimeout(meTimer);
+  meNote.innerHTML = html ? `<span>${html}</span><button type="button" class="me-close" aria-label="닫기">×</button>` : "";
+  meNote.hidden = !html;
+  if (html && autoHide) meTimer = setTimeout(() => showMe(""), 6000);
+};
 let mePos = null;
 function nearestFree(pos) {
   let best = null, bd = Infinity;
@@ -1564,27 +1574,30 @@ function placeMe(pos, acc) {
 }
 function guideFromMe() {
   const n = nearestFree(mePos);
-  if (!n) { map.setView([mePos.lat, mePos.lng], 14, { animate: !reduced }); showMe(`${esc(state.region.name)}에 지금 '여유' 충전소가 없습니다.`); return; }
+  if (!n) { map.setView([mePos.lat, mePos.lng], 14, { animate: !reduced }); showMe(`${esc(state.region.name)}에 지금 '여유' 충전소가 없습니다.`, true); return; }
   map.fitBounds(L.latLngBounds([[mePos.lat, mePos.lng], [n.s.lat, n.s.lng]]), { padding: [60, 60], maxZoom: 16, animate: !reduced });
   const price = n.s.price != null ? `, ${n.s.price.toFixed(1)}원/kWh` : "";
   showMe(`가장 가까운 여유 충전소: <button type="button" data-id="${esc(n.s.id)}">${esc(n.s.name)}</button> (${n.d < 1 ? Math.round(n.d * 1000) + "m" : n.d.toFixed(1) + "km"}${price})`);
 }
 document.getElementById("zme").addEventListener("click", () => {
-  if (!navigator.geolocation) { showMe("이 브라우저는 위치 기능을 지원하지 않습니다."); return; }
+  if (!navigator.geolocation) { showMe("이 브라우저는 위치 기능을 지원하지 않습니다.", true); return; }
   showMe("현재 위치를 찾는 중입니다…");
   navigator.geolocation.getCurrentPosition(p => {
     mePos = { lat: p.coords.latitude, lng: p.coords.longitude };
     placeMe(mePos, p.coords.accuracy);
     const f = GEO.features.find(f => d3.geoContains(f, [mePos.lng, mePos.lat]));
-    if (!f) { map.setView([mePos.lat, mePos.lng], 11, { animate: !reduced }); showMe("현재 위치가 충청북도 밖이라 가까운 충전소를 안내할 수 없습니다."); return; }
+    if (!f) { map.setView([mePos.lat, mePos.lng], 11, { animate: !reduced }); showMe("현재 위치가 충청북도 밖이라 가까운 충전소를 안내할 수 없습니다.", true); return; }
     if (f.properties.zscode !== state.region.code) setRegion(regionByCode.get(f.properties.zscode));
     afterLoaded(guideFromMe);
   }, err => {
     showMe(err.code === 1 ? "위치 권한이 꺼져 있습니다. 브라우저(또는 휴대폰 설정)에서 이 사이트의 위치 접근을 허용해 주세요."
-                          : "현재 위치를 찾지 못했습니다. 잠시 후 다시 눌러 주세요.");
+                          : "현재 위치를 찾지 못했습니다. 잠시 후 다시 눌러 주세요.", true);
   }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 });
 });
-meNote.addEventListener("click", e => { const t = e.target.closest("[data-id]"); if (t) select(t.dataset.id); });
+meNote.addEventListener("click", e => {
+  if (e.target.closest(".me-close")) { showMe(""); return; }
+  const t = e.target.closest("[data-id]"); if (t) select(t.dataset.id);
+});
 
 document.getElementById("zin").addEventListener("click", () => map.zoomIn());
 document.getElementById("zout").addEventListener("click", () => map.zoomOut());
