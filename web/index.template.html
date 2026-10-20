@@ -69,7 +69,8 @@ button, input, select { font: inherit; color: inherit; }
 .rlabel { font: 700 12px var(--font-body); color: var(--ink-3); white-space: nowrap; text-shadow: 0 0 3px #fff, 0 0 3px #fff; }
 .rlabel span { position: absolute; transform: translate(-50%, -50%); }
 .arrow-head { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
-.arrow-head path { fill: var(--free); }
+.arrow-head { overflow: visible; }
+.arrow-head path { fill: var(--ink); stroke: #fff; stroke-width: 2; stroke-linejoin: round; paint-order: stroke; }
 .map-tools { position: absolute; top: 10px; right: 10px; display: flex; flex-direction: column; gap: 4px; z-index: 1000; }
 .map-tools button { width: 32px; height: 32px; border: 1px solid var(--rule); background: var(--surface); border-radius: 3px; cursor: pointer; font-size: 17px; line-height: 1; }
 .map-tools button.fit { width: auto; padding: 0 6px; font-size: 13px; }
@@ -1180,12 +1181,14 @@ function drawMap() {
   const links = state.p.rad > 0 ? shown.filter(s => s.alt && !state.hidden.has(s.alt.st.status)) : [];
   for (const s of links) {
     const a = [s.lat, s.lng], b = [s.alt.st.lat, s.alt.st.lng];
-    linkLayer.addLayer(L.polyline([a, b], { renderer: canvas, color: C.free, weight: 2, dashArray: "5 4", opacity: 0.9, interactive: false }));
+    // 흰 테두리 위에 진한 점선: 지도 배경·점 색과 겹쳐도 잘 보이게
+    linkLayer.addLayer(L.polyline([a, b], { renderer: canvas, color: "#fff", weight: 6.5, opacity: 0.95, lineCap: "round", interactive: false }));
+    linkLayer.addLayer(L.polyline([a, b], { renderer: canvas, color: C.ink, weight: 3, dashArray: "7 5", opacity: 1, lineCap: "butt", interactive: false }));
     const p1 = map.latLngToLayerPoint(a), p2 = map.latLngToLayerPoint(b);   // 메르카토르에서는 확대해도 각도가 같음
     const deg = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
-    const back = (s.alt.st.r || 6) + 13;
+    const back = (s.alt.st.r || 6) + 18;
     linkLayer.addLayer(L.marker(b, { interactive: false, keyboard: false, icon: L.divIcon({ className: "", iconSize: [0, 0],
-      html: `<svg class="arrow-head" width="10" height="10" viewBox="0 0 10 10" style="transform:rotate(${deg}deg) translate(-${back}px,-5px)"><path d="M0,0 L10,5 L0,10z"/></svg>` }) }));
+      html: `<svg class="arrow-head" width="18" height="18" viewBox="-2 -2 18 18" style="transform:rotate(${deg}deg) translate(-${back}px,-9px)"><path d="M0,0 L14,7 L0,14z"/></svg>` }) }));
   }
   for (const s of shown) {
     const m = L.circleMarker([s.lat, s.lng], { renderer: canvas, radius: s.r, ...DOT_STYLE[s.status] })
