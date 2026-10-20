@@ -1133,6 +1133,7 @@ const DOT_STYLE = {
   미확인: { fillColor: "#fff", color: C.ink3, weight: 1.2, fillOpacity: 1, dashArray: "2 2" },
 };
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const ADMIN = /admin/i.test(location.hash + location.search);   // 관리자 확인용: https://…/#admin
 const map = L.map("map", { zoomControl: false, preferCanvas: true, minZoom: 8, maxZoom: 18, zoomSnap: 0.5 });
 map.attributionControl.setPrefix(false);
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -1418,7 +1419,9 @@ async function loadStatic(region) {
                               when: `${hist.date} ${slot.t.slice(0, 2)}:${slot.t.slice(2)}` };
   if (first && region.code === state.region.code) state.hour = h;
   const mins = Math.round((Date.now() - Date.parse(`${hist.date}T${slot.t.slice(0, 2)}:${slot.t.slice(2)}:00+09:00`)) / 60000);
-  return mins > 60 ? `마지막 수집이 ${mins >= 1440 ? Math.floor(mins / 1440) + "일" : Math.floor(mins / 60) + "시간"} 전입니다. 수집이 멈췄는지 확인이 필요합니다.` : "";
+  // 수집 지연 경고는 관리자 화면(주소 끝에 #admin)에서만. 방문자에게는 '수집 기준 시각'만 보인다.
+  if (!ADMIN || mins <= 120) return "";
+  return `[관리자] 마지막 수집이 ${mins >= 1440 ? Math.floor(mins / 1440) + "일" : Math.floor(mins / 60) + "시간"} 전입니다. 수집이 멈췄는지 확인이 필요합니다.`;
 }
 async function loadLive(region, force = false) {
   state.loading = true;
