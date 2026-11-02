@@ -793,6 +793,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
 		print-color-adjust: exact;
 		}
 	}
+/*__SIM_CSS__*/
 </style>
 
 <header class="top">
@@ -804,6 +805,11 @@ svg.leaflet-image-layer.leaflet-interactive path {
   </div>
 </header>
 
+<nav class="sim-tabs" aria-label="화면 선택">
+  <button type="button" id="tab-monitor" aria-pressed="true" aria-controls="monitor-view">요금 관제</button>
+  <button type="button" id="tab-simulation" aria-pressed="false" aria-controls="simulation-view">수요 분산 시뮬레이션</button>
+</nav>
+<div id="monitor-view">
 <main class="app">
   <div class="map-pane">
     <div id="map" role="region" aria-label="선택한 시·군의 충전소 지도"></div>
@@ -895,6 +901,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
   </div>
 </div>
 
+</div>
+<section id="simulation-view" class="sim-page" aria-label="수요 분산 시뮬레이션" hidden></section>
 <footer>
   <span>충전기 데이터: 한국환경공단 전기자동차 충전소 정보 API(공공데이터포털). 시·군 경계: 통계청 2018 시군구 경계.</span>
   <span>충전소 이름, 위치, 상태는 실제 API 값이고, 기본 요금은 무공해차 통합누리집에 등재된 운영사 회원가입니다. 혼잡 배수를 곱한 동적 단가는 정책 시뮬레이션 값이며 실제 청구 요금이 아닙니다.</span>
@@ -1499,7 +1507,7 @@ async function detectServer() {
   } else {
     const h = await getJSON("api/health");
     const stop = notice => { state.loading = false; state.notice = notice; refresh(); };
-    if (!h || !h.ok) return stop("서버에 연결되지 않았습니다. 맥에서 실행 파일(run.command)을 켠 뒤 그 주소로 열어 주세요");
+    if (!h || !h.ok) return stop("실제 수집 데이터가 없습니다. 로컬에서는 python -m scripts.sync_public_data로 공개 저장본을 받거나 기존 API 서버를 실행해 주세요. 시뮬레이션의 예시 모드는 데이터 없이도 실행됩니다.");
     if (h.public_url) setupShare(h.public_url);
     if (!h.live) { setupKeyForm(); return stop("공공데이터포털 인증키를 '실제 데이터 켜기' 칸에 넣으면 실제 충전소 현황이 표시됩니다"); }
     state.server = "api"; refreshSec = h.cache_ttl_sec || 300;
@@ -1608,8 +1616,25 @@ document.getElementById("zfit").addEventListener("click", () => fitRegion(true))
 
 let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { map.invalidateSize(); renderSpark(); }, 150); });
 
+window.ESSMonitor = {
+  regions: REGIONS,
+  classifyStatus,
+  async stations(code) {
+    const region = regionByCode.get(code);
+    if (!region || !state.server) throw new Error('실제 데이터 연결이 없습니다. 예시 데이터 모드로 실행할 수 있습니다.');
+    await loadLive(region);
+    const ext = external(code);
+    if (!ext) throw new Error('선택한 지역의 실제 충전소 기록이 없습니다.');
+    const chargers = ext.chargers || prepare(ext.rows || [], true);
+    return { list: summarize(chargers, state.p, liveHour(code)).list, when: ext.when, kind: ext.kind };
+  },
+  resize() { map.invalidateSize(); }
+};
 renderRegions();
 refresh({ refit: true });
-detectServer();
+window.ESSMonitor.ready = detectServer();
 })();
 </script>
+<script type="application/json" id="sim-config">/*__SIM_CONFIG__*/</script>
+<script>/*__SIM_ENGINE__*/</script>
+<script>/*__SIM_UI__*/</script>
