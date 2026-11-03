@@ -29,15 +29,20 @@ MIN_SESSIONS = 5
 WINDOW_DAYS = 30
 L_DAYS = 14
 SHAPE_PATH = config.ROOT / "models" / "start_shape.json"
-RECORDING_SINCE_DEFAULT = "2026-11-04 02:04:00"   # 세션 기록 첫 수집 (이후 끝난 충전은 빠짐없이 기록)
 SPEED_NAME = {"급속": "fast", "완속": "slow"}
 
 
-def recording_since(history_dir: str | Path) -> pd.Timestamp:
+def recording_since(history_dir: str | Path, max_gap_min: int = 35) -> pd.Timestamp | None:
+    """가장 최근의 '촘촘한 수집' 구간 시작 시각. 이 뒤로 끝난 충전은 빠짐없이 기록됐다고 본다.
+    (수집 간격이 길면 그사이 한 충전기에서 끝난 충전 여러 건 중 마지막 것만 남는다)"""
     meta = Path(history_dir) / "sessions" / "meta.json"
-    if meta.exists():
-        return pd.Timestamp(json.loads(meta.read_text(encoding="utf-8"))["recording_since"])
-    return pd.Timestamp(RECORDING_SINCE_DEFAULT)
+    runs = json.loads(meta.read_text(encoding="utf-8")).get("runs", []) if meta.exists() else []
+    if len(runs) < 2:
+        return None
+    t = pd.to_datetime(pd.Series(sorted(set(runs))))
+    gaps = t.diff() > pd.Timedelta(minutes=max_gap_min)
+    start = t[gaps].iloc[-1] if gaps.any() else t.iloc[0]
+    return start if start < t.iloc[-1] else None
 
 
 # ── 시간대 모양 (서울 2025) ───────────────────────────────────
@@ -187,12 +192,14 @@ def _interp(d: pd.DataFrame, mid: float) -> np.ndarray:
 
 
 # ── 검증 ─────────────────────────────────────────────────────
-def evaluate_starts(obs: pd.DataFrame, sessions: pd.DataFrame, since: pd.Timestamp, now: pd.Timestamp,
+def evaluate_starts(obs: pd.DataFrame, sessions: pd.DataFrame, since: pd.Timestamp | None, now: pd.Timestamp,
                     shape: dict | None = None) -> dict:
     """빠짐없이 기록된 기간의 실제 시간당 충전 시작 건수 vs 추정 (충전소·종류·1시간 단위).
     급속은 3시간, 완속은 24시간 지난 시간대만 본다 (아직 안 끝난 충전은 기록 전이라).
     추정의 하루 평균 시작률은 검증 시간대 이전 기록으로만 계산한다."""
     shape = shape if shape is not None else load_shape()
+    if since is None:
+        return {"note": "15분 간격 세션 기록이 아직 시작되지 않음"}
     s = clean(sessions, now)
     out = {"recording_since": str(since)}
     rates, _ = daily_rates(obs, sessions[sessions["end"] < since], since)

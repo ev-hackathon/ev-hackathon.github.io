@@ -75,3 +75,14 @@ def test_evaluate_starts_scores():
     v = demand.evaluate_starts(_obs(now), _sessions(now), since, now,
                                shape={"fast": {"weekday": [1.0] * 24, "weekend": [1.0] * 24}, "slow": {"weekday": [1.0] * 24, "weekend": [1.0] * 24}})
     assert v["fast"]["n_station_hours"] == 5 and "MAE" in v["fast"]
+
+
+def test_recording_since_uses_latest_dense_stretch(tmp_path):
+    import json
+    (tmp_path / "sessions").mkdir()
+    runs = ["2026-11-04 02:04", "2026-11-04 02:46", "2026-11-04 04:30", "2026-11-04 04:45", "2026-11-04 05:00"]
+    (tmp_path / "sessions" / "meta.json").write_text(json.dumps({"runs": runs}))
+    assert demand.recording_since(tmp_path) == pd.Timestamp("2026-11-04 04:30")
+    (tmp_path / "sessions" / "meta.json").write_text(json.dumps({"runs": runs[:1]}))
+    assert demand.recording_since(tmp_path) is None
+    assert "note" in demand.evaluate_starts(pd.DataFrame(), pd.DataFrame(), None, pd.Timestamp("2026-11-04 06:00"))

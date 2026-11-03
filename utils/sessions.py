@@ -80,9 +80,14 @@ def append(region: str, rows: list[dict], base: Path | str | None = None) -> int
             path.parent.mkdir(parents=True, exist_ok=True)
             part.to_csv(path, mode="a", header=not path.exists(), index=False, encoding="utf-8")
     last_path.parent.mkdir(parents=True, exist_ok=True)
-    meta = root / "sessions" / "meta.json"   # 이 시각 이후 끝난 충전은 빠짐없이 기록됨 (첫 기록 시각)
-    if not meta.exists():
-        meta.write_text(json.dumps({"recording_since": f"{now_limit - timedelta(minutes=10):%Y-%m-%d %H:%M:%S}"}), encoding="utf-8")
+    # 기록한 수집 시각 목록: 간격이 촘촘한(≤35분) 구간에서만 '끝난 충전을 빠짐없이 기록'했다고 본다 (utils/demand.py)
+    meta = root / "sessions" / "meta.json"
+    m = json.loads(meta.read_text(encoding="utf-8")) if meta.exists() else {}
+    runs = m.get("runs", [])
+    run = f"{now_limit - timedelta(minutes=10):%Y-%m-%d %H:%M}"
+    if run not in runs:
+        runs = (runs + [run])[-3000:]
+    meta.write_text(json.dumps({"runs": runs}, separators=(",", ":")), encoding="utf-8")
     last_path.write_text(json.dumps(seen, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     return len(new)
 
