@@ -865,6 +865,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
         <label for="disc">여유 거점 할인 <output id="disc-o" for="disc"></output><input type="range" id="disc" min="0" max="0.5" step="0.05" value="0.2"></label>
         <label for="sur">만차 거점 할증 <output id="sur-o" for="sur"></output><input type="range" id="sur" min="0" max="0.5" step="0.05" value="0.15"></label>
         <label for="rad">대체 거점 탐색 반경 <output id="rad-o" for="rad"></output><input type="range" id="rad" min="0.5" max="10" step="0.5" value="3"></label>
+        <div class="check"><input type="checkbox" id="fc"><label for="fc" style="display:block">1시간 후 예측으로 요금 판정<small>AI 예측(LightGBM)의 1시간 후 예상 혼잡도로 할인·할증. 지도 색은 지금 상태</small></label></div>
         <div class="check"><input type="checkbox" id="tod"><label for="tod" style="display:block">시간대 가중치 적용<small>11~14시 태양광 피크 ×0.90, 18~22시 저녁 피크 ×1.05 (가정값)</small></label></div>
         <div class="check"><input type="checkbox" id="lim" checked><label for="lim" style="display:block">이용자 제한 충전소 제외<small>아파트 입주민 전용처럼 누구나 쓸 수 없는 곳</small></label></div>
       </div>
@@ -1025,8 +1026,12 @@ function summarize(chargers, p, hour) {
     for (const x of [s.fast, s.slow]) {
       if (!x.total) continue;
       x.status = classifyStatus(x.avail, x.charging, x.fault, p.th);
-      const m = congestionMult(x.status, p);
-      x.mult = m; x.price = m == null ? null : round1(x.base * m * tod.m);
+      // 예측 기반 요금: 1시간 후 예상 상태로 배수를 정함 (지도 색과 대체 안내는 지금 상태 그대로)
+      const fp = p.fc && FORECAST && hour === liveHour() ? FORECAST.by.get(`${s.id}|${x === s.fast ? "fast" : "slow"}`) : null;
+      x.priceBasis = fp ? fp.status : x.status;
+      const m = x.status === "불가" ? null : congestionMult(x.priceBasis, p);
+      const t = fp ? timeMult((new Date(FORECAST.target_time).getUTCHours() + 9) % 24, p) : tod;
+      x.mult = m; x.price = m == null ? null : round1(x.base * m * t.m);
     }
     s.price = s.fast.price ?? s.slow.price;
     s.ratio = (s.avail + s.charging) ? s.avail / (s.avail + s.charging) : null;
@@ -1075,7 +1080,7 @@ const kstHour = () => (new Date().getUTCHours() + 9) % 24;
 const todayKST = () => new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10);
 const state = {
   region: REGIONS[0], hour: kstHour(), live: {}, history: {}, server: false, loading: true, notice: "",
-  p: { th: 0.5, disc: 0.2, sur: 0.15, rad: 3, tod: false, lim: true },
+  p: { th: 0.5, disc: 0.2, sur: 0.15, rad: 3, tod: false, lim: true, fc: false },
   hidden: new Set(), selected: null, sort: { key: "status", dir: 1 }, q: "",
   view: null,
 };
@@ -1263,13 +1268,13 @@ function renderPairs() {
 
 // 단가 출처 한 줄: 운영사 요금표의 어느 값을 썼는지, 비회원가는 얼마인지
 // AI 예측 (data/forecast.json, scripts/forecast.py): 마지막 수집 1시간 뒤 예상 이용률 → 예상 상태·단가
-let FORECAST = null;
+var FORECAST = null;   // var: 첫 요금 계산이 이 줄보다 먼저 불려도 안전하게
 async function loadForecast() {
   const f = await getJSON("data/forecast.json");
   if (!f || f.schema_version !== 1 || !Array.isArray(f.predictions)) return;
   const by = new Map(f.predictions.map(p => [`${p.station_id}|${p.speed}`, p]));
   FORECAST = { ...f, by };
-  if (state.selected) renderDetail();
+  if (state.p.fc) refresh(); else if (state.selected) renderDetail();
 }
 function forecastNote(s) {
   if (!FORECAST || state.hour !== liveHour()) return "";   // 지난 시간대를 재생할 때는 예측을 보여 주지 않음
@@ -1307,7 +1312,7 @@ function renderDetail() {
   if (!s) { el.hidden = true; drawSelection(); return; }
   const { tod } = state.view;
   const row = (label, x) => !x.total ? "" : `<tr><td>${label}<small style="display:block;color:var(--ink-2)">${Math.round(x.kw)}kW</small></td><td>${x.avail}/${x.total}</td><td>${x.base.toFixed(1)}</td>
-      <td class="c-${x.status}">${x.mult == null ? "–" : "×" + x.mult.toFixed(2)}${tod.m !== 1 ? " ×" + tod.m.toFixed(2) : ""}</td>
+      <td class="c-${x.priceBasis || x.status}">${x.mult == null ? "–" : "×" + x.mult.toFixed(2)}${tod.m !== 1 ? " ×" + tod.m.toFixed(2) : ""}${x.priceBasis && x.priceBasis !== x.status ? `<small style="display:block">예측 ${STATUS_LABEL[x.priceBasis]}</small>` : ""}</td>
       <td><b class="c-${x.status}">${fmt(x.price)}</b></td></tr>`;
   let alt = "";
   if (s.alt) {
@@ -1572,7 +1577,7 @@ document.getElementById("play").addEventListener("click", e => {
   timer = setInterval(() => { state.hour = (state.hour + 1) % 24; refresh(); }, 850);
 });
 for (const id of ["th", "disc", "sur", "rad"]) document.getElementById(id).addEventListener("input", e => { state.p[id] = +e.target.value; refresh(); });
-for (const id of ["tod", "lim"]) document.getElementById(id).addEventListener("change", e => { state.p[id] = e.target.checked; refresh(); });
+for (const id of ["tod", "lim", "fc"]) document.getElementById(id).addEventListener("change", e => { state.p[id] = e.target.checked; refresh(); });
 document.getElementById("q").addEventListener("input", e => { state.q = e.target.value; renderTable(); });
 document.getElementById("reload").addEventListener("click", () => loadLive(state.region, true));
 // ───────────────────────── 내 위치 ─────────────────────────
