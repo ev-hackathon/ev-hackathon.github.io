@@ -48,7 +48,7 @@ def test_daily_rate_is_littles_law():
 
 def test_build_v2_contract():
     now = pd.Timestamp("2026-11-03 12:00")
-    shape = {"fast": {"weekday": [1.0] * 24, "weekend": [1.0] * 24}, "slow": {"weekday": [2.0] * 24, "weekend": [2.0] * 24}}
+    shape = {"fast": [1.0] * 96, "slow": [2.0] * 96}
     v2 = demand.build_v2(_out(now, 0.7, 1), _out(now, 0.9, 2), _obs(now), _sessions(now), shape=shape)
     assert v2["schema_version"] == 2 and v2["interval_minutes"] == 15 and v2["demand_measure"] == "charging_starts"
     p = pd.DataFrame(v2["predictions"])
@@ -73,7 +73,7 @@ def test_evaluate_starts_scores():
     now = pd.Timestamp("2026-11-03 12:00")
     since = now - pd.Timedelta(hours=8)
     v = demand.evaluate_starts(_obs(now), _sessions(now), since, now,
-                               shape={"fast": {"weekday": [1.0] * 24, "weekend": [1.0] * 24}, "slow": {"weekday": [1.0] * 24, "weekend": [1.0] * 24}})
+                               shape={"fast": [1.0] * 96, "slow": [1.0] * 96})
     assert v["fast"]["n_station_hours"] == 5 and "MAE" in v["fast"]
 
 
@@ -86,3 +86,25 @@ def test_recording_since_uses_latest_dense_stretch(tmp_path):
     (tmp_path / "sessions" / "meta.json").write_text(json.dumps({"runs": runs[:1]}))
     assert demand.recording_since(tmp_path) is None
     assert "note" in demand.evaluate_starts(pd.DataFrame(), pd.DataFrame(), None, pd.Timestamp("2026-11-04 06:00"))
+
+
+def test_deconvolve_recovers_start_profile():
+    # 시작이 18시 칸에 몰리고 충전 시간이 정확히 60분 → 18:00~19:00 사이 스냅숏에서만 충전 중
+    rng = np.random.default_rng(0)
+    tau = rng.uniform(0, 1440, 400)
+    lam_true = np.zeros(96); lam_true[72:76] = 1.0          # 18:00~19:00 시작
+    starts = (np.arange(96) * 15 + 7.5)
+    occ = np.array([sum(lam_true[j] for j in range(96) if 0 <= (t - starts[j]) % 1440 < 60) for t in tau])
+    lam = demand.deconvolve(tau, occ, np.full(500, 60.0), smooth=1.0)
+    h = lam.reshape(24, 4).sum(1)
+    assert h.argmax() == 18 and h[18] > 3 * h[[3, 9, 12]].max()
+
+
+def test_chungbuk_shape_from_obs():
+    now = pd.Timestamp("2026-11-03 12:00")
+    obs = _obs(now)
+    s = pd.concat([_sessions(now, 60)], ignore_index=True)
+    sh = demand.chungbuk_shape(obs, s, now)
+    assert len(sh["fast"]) == 96 and abs(np.mean(sh["fast"]) - 1) < 1e-3   # 평균 1
+    assert demand.shape_at(sh, "fast", now) == sh["fast"][48]
+    assert demand.shape_at({}, "fast", now) == 1.0

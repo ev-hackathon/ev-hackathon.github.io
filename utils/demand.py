@@ -1,18 +1,23 @@
 """
-신규 충전 수요(충전 시작 건수) 추정 — 시뮬레이션 v2 계약용 (박민선 docs/simulation-report.md 2장)
+신규 충전 수요(충전 시작 건수) 추정 — 시뮬레이션 v2 계약용 (박민선 docs/simulation-report.md 2장). 모두 충북 데이터.
 
-  기대 신규 건수(충전소, 구간) = 하루 평균 시작률 λ̄ × 시간대 모양 shape(급속/완속, 평일/주말, 시각) × 구간 길이
+  기대 신규 건수(충전소, 15분 구간) = 하루 평균 시작률 λ̄ × 시간대 모양 shape(급속/완속, 시각) × 구간 길이
 
 1) 하루 평균 시작률 λ̄ = L̄ ÷ W  (리틀의 법칙. 하루 평균으로 보면 정확히 성립)
    L̄ : 최근 14일 그 충전소에서 평균 몇 대가 충전 중이었나 (시간대별 평균을 24시간에 고르게 평균, 수집 간격 편향 제거)
    W  : 충전 1건 평균 시간. 충북 충전 세션 기록(lastTsdt/lastTedt) 최근 30일.
         충전소 기록 5건 이상이면 충전소 평균, 아니면 시·군 평균, 그다음 충북 평균.
-2) 시간대 모양: 서울시 소유 충전기 2025년 1년치 충전 21만 건의 시작 시각 분포 (models/start_shape.json).
-   충북 세션은 지금까지 '충전기마다 마지막 1건'이라 시작 시각이 저녁으로 쏠려 모양 추정에 쓰지 않는다.
-   빠짐없이 기록한 충북 세션이 14일 이상 쌓이면 충북 모양으로 바꿀 수 있다.
+2) 시간대 모양 (충북 전체, 15분 칸 96개, 하루 평균 1): 역합성곱으로 푼다.
+   어느 시각의 충전 중 대수 = 그 전에 시작한 충전 중 아직 안 끝난 것의 합
+     L(τ) = Σ_j λ_j × P(칸 j에서 시작한 충전이 τ에 아직 충전 중)    (24시간 순환, 충전 시간 분포는 충북 세션 기록)
+   충북 전 충전소의 수집 시각별 평균 충전 중 대수(3주)로 λ_j ≥ 0 을 매끄럽게(2차 차분 벌점) 최소제곱으로 푼다.
+   서울 2025 충전 이력(정답 시작 시각을 앎)에서 띄엄띄엄한 스냅숏 160개만으로 시작 분포를 복원해 확인했다
+   (급속 상관 0.99, 완속 0.80~0.93 — scripts/eval_starts_seoul.py).
+   충북 세션 기록은 지금까지 '충전기마다 마지막 1건'이라 시작 시각이 저녁으로 쏠려 직접 세지 않는다.
 
 순간값으로 λ(t) = L(t) ÷ W 를 쓰지 않는 이유: 완속은 밤새 꽂아 둔 차 때문에 새벽 L이 높지만 새벽에 시작하는 충전은 적다.
-검증: 세션 기록이 빠짐없이 쌓이기 시작한 시각 이후의 실제 시간당 시작 건수와 비교(evaluate_starts).
+평일/주말은 아직 주말 수집이 적어 나누지 않는다.
+검증: 15분 간격 세션 기록이 쌓인 뒤 실제 시간당 시작 건수와 비교(evaluate_starts).
 """
 from __future__ import annotations
 
@@ -23,12 +28,10 @@ import numpy as np
 import pandas as pd
 from scipy.stats import poisson
 
-import config
 
 MIN_SESSIONS = 5
 WINDOW_DAYS = 30
 L_DAYS = 14
-SHAPE_PATH = config.ROOT / "models" / "start_shape.json"
 SPEED_NAME = {"급속": "fast", "완속": "slow"}
 
 
@@ -45,33 +48,60 @@ def recording_since(history_dir: str | Path, max_gap_min: int = 35) -> pd.Timest
     return start if start < t.iloc[-1] else None
 
 
-# ── 시간대 모양 (서울 2025) ───────────────────────────────────
-def build_shape(seoul_sessions: pd.DataFrame) -> dict:
-    """서울 세션(start, end, kwh) → {fast|slow: {weekday|weekend: 24개, 평균 1}}. 급속 ≥20kW, 완속 <15kW이면서 1시간 이상"""
-    s = seoul_sessions.copy()
-    dur = (s["end"] - s["start"]).dt.total_seconds() / 60
-    kw = s["kwh"] / (dur / 60)
-    s["speed"] = np.where((kw < 15) & (dur >= 60), "slow", np.where(kw >= 20, "fast", ""))
-    s = s[s["speed"] != ""]
-    s["we"] = np.where(s["start"].dt.dayofweek >= 5, "weekend", "weekday")
-    out = {"source": "서울시 소유 전기차충전기 일별 시간별 충전현황(2025년)", "n": {}}
-    for sp, g in s.groupby("speed"):
-        out["n"][sp] = int(len(g))
-        out[sp] = {}
-        for we, h in g.groupby("we"):
-            c = h["start"].dt.hour.value_counts().reindex(range(24), fill_value=0).to_numpy(float)
-            out[sp][we] = [round(float(v), 4) for v in c / c.mean()]
+# ── 시간대 모양 (충북, 역합성곱) ─────────────────────────────
+BINS = 96
+SMOOTH = 100.0   # 서울 검증에서 가장 잘 복원된 값 (3·10·30·100 비교)
+
+
+def survival(minutes: np.ndarray):
+    m = np.sort(np.clip(np.asarray(minutes, float), 0, 24 * 60 - 1))
+    return lambda x: 1 - np.searchsorted(m, x, side="right") / len(m)
+
+
+def deconvolve(tau_min: np.ndarray, occupancy: np.ndarray, minutes: np.ndarray, smooth: float = SMOOTH) -> np.ndarray:
+    """수집 시각(하루 중 분)별 충전 중 대수 + 충전 시간 표본 → 15분 칸별 시작 건수(같은 단위). 24시간 순환."""
+    from scipy.optimize import nnls
+    S = survival(minutes)
+    tau = np.asarray(tau_min, float)
+    u = np.arange(15) + 0.5
+    A = np.zeros((len(tau), BINS))
+    for j in range(BINS):
+        lag = (tau[:, None] - (j * 15 + u)[None, :]) % 1440
+        A[:, j] = S(lag).mean(axis=1)
+    D = np.zeros((BINS, BINS))
+    for i in range(BINS):
+        D[i, i], D[i, (i - 1) % BINS], D[i, (i + 1) % BINS] = -2, 1, 1
+    lam, _ = nnls(np.vstack([A, np.sqrt(len(tau)) * smooth * A.mean() * D]),
+                  np.concatenate([np.asarray(occupancy, float), np.zeros(BINS)]))
+    return lam
+
+
+def chungbuk_shape(obs: pd.DataFrame, sessions: pd.DataFrame, now: pd.Timestamp) -> dict:
+    """{fast|slow: 96개(평균 1)} + 근거. obs 전체 기간의 충북 평균 충전 중 대수와 충북 충전 시간 분포로 푼다."""
+    s = clean(sessions, now)
+    o = obs[obs["ts"] <= now]
+    out = {"source": "충북 수집 기록 역합성곱", "bins_minutes": 15, "snapshots": {}}
+    for sp, f in (("fast", 1), ("slow", 0)):
+        t = o[o["fast"] == f].groupby("ts").agg(c=("c", "sum"), n=("statId", "size"))
+        mins = s.loc[s["speed"] == sp, "minutes"].to_numpy()
+        if len(t) < 24 or len(mins) < 50:
+            continue
+        lam = deconvolve((t.index.hour * 60 + t.index.minute).to_numpy(), (t["c"] / t["n"]).to_numpy(), mins)
+        if lam.mean() <= 0:
+            continue
+        out[sp] = [round(float(v), 4) for v in lam / lam.mean()]
+        out["snapshots"][sp] = int(len(t))
     return out
 
 
-def load_shape() -> dict | None:
-    return json.loads(SHAPE_PATH.read_text(encoding="utf-8")) if SHAPE_PATH.exists() else None
-
-
 def shape_at(shape: dict | None, speed: str, ts: pd.Timestamp) -> float:
-    if not shape:
+    if not shape or speed not in shape:
         return 1.0
-    return shape[speed]["weekend" if ts.dayofweek >= 5 else "weekday"][ts.hour]
+    return shape[speed][(ts.hour * 60 + ts.minute) // 15]
+
+
+def hourly(shape: dict, speed: str) -> list[float]:
+    return [round(float(np.mean(shape[speed][h * 4:h * 4 + 4])), 2) for h in range(24)] if speed in shape else []
 
 
 # ── 충전 시간 W ──────────────────────────────────────────────
@@ -131,8 +161,8 @@ def daily_rates(obs: pd.DataFrame, sessions: pd.DataFrame, now: pd.Timestamp) ->
 def build_v2(out1: dict, out2: dict, obs: pd.DataFrame, sessions: pd.DataFrame, interval_min: int = 15,
              span_h: float = 2.0, validation: dict | None = None, shape: dict | None = None) -> dict:
     """1·2시간 예측(schema 1) + 수집 관측 + 세션 기록 → 15분 구간별 이용률·기대 신규 충전 건수"""
-    shape = shape if shape is not None else load_shape()
     gen = pd.Timestamp(out1["generated_at"]).tz_localize(None)
+    shape = shape if shape is not None else chungbuk_shape(obs, sessions, gen)
     rates, dist = daily_rates(obs, sessions, gen)
     p1 = pd.DataFrame(out1["predictions"])
     p2 = pd.DataFrame(out2["predictions"])[["station_id", "speed", "utilization"]].rename(columns={"utilization": "u2"})
@@ -170,11 +200,12 @@ def build_v2(out1: dict, out2: dict, obs: pd.DataFrame, sessions: pd.DataFrame, 
         "demand_measure": "charging_starts",
         "method": {
             "utilization_mean": "구간 중앙 시각의 이용률. 지금 값(0시간)·1시간·2시간 예측을 직선으로 이음",
-            "expected_new_sessions": f"하루 평균 시작률(최근 {L_DAYS}일 평균 충전 중 대수 ÷ 평균 충전 시간) × 시간대 모양(서울 2025 충전 시작 분포) × 구간 길이. 기대값이며 정수 실적이 아님",
+            "expected_new_sessions": f"하루 평균 시작률(최근 {L_DAYS}일 평균 충전 중 대수 ÷ 평균 충전 시간) × 시간대 모양(충북 수집 기록을 역합성곱한 충전 시작 분포) × 구간 길이. 기대값이며 정수 실적이 아님",
             "new_sessions_p10_p90": "기대값을 평균으로 한 포아송 분포의 10%·90% 분위 (낮음·높음 수요 시나리오)",
             "duration_source": f"충북 충전 세션 기록(lastTsdt/lastTedt) 최근 {WINDOW_DAYS}일. 충전소 기록 {MIN_SESSIONS}건 미만이면 시·군 평균, 그다음 충북 평균",
         },
         "duration_minutes": dist,
+        "start_shape_hourly": {sp: hourly(shape, sp) for sp in ("fast", "slow")},
         "stations": [{"station_id": r.statId, "speed": r.speed, "mean_duration_minutes": round(float(r.W_min), 1),
                       "duration_level": r.level, "mean_charging": round(float(r.L_bar), 3),
                       "daily_starts": round(float(r.rate_h) * 24, 2)}
@@ -197,12 +228,13 @@ def evaluate_starts(obs: pd.DataFrame, sessions: pd.DataFrame, since: pd.Timesta
     """빠짐없이 기록된 기간의 실제 시간당 충전 시작 건수 vs 추정 (충전소·종류·1시간 단위).
     급속은 3시간, 완속은 24시간 지난 시간대만 본다 (아직 안 끝난 충전은 기록 전이라).
     추정의 하루 평균 시작률은 검증 시간대 이전 기록으로만 계산한다."""
-    shape = shape if shape is not None else load_shape()
     if since is None:
         return {"note": "15분 간격 세션 기록이 아직 시작되지 않음"}
     s = clean(sessions, now)
     out = {"recording_since": str(since)}
-    rates, _ = daily_rates(obs, sessions[sessions["end"] < since], since)
+    past = sessions[sessions["end"] < since]
+    rates, _ = daily_rates(obs, past, since)
+    shape = shape if shape is not None else chungbuk_shape(obs, past, since)
     for speed, lag_h in (("fast", 3), ("slow", 24)):
         lo, hi = since.ceil("h"), (now - pd.Timedelta(hours=lag_h)).floor("h")
         if hi <= lo:
