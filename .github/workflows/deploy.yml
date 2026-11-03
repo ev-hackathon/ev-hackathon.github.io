@@ -90,7 +90,7 @@ jobs:
       # AI 예측: 1시간 후 충전소별 이용률 (실패해도 사이트 배포는 계속)
       - name: AI 수요 예측
         continue-on-error: true
-        run: python -m scripts.forecast --history hist/history --out _site/data/forecast.json --eval-every-hours 72
+        run: python -m scripts.forecast --history hist/history --out _site/data/forecast.json --eval-every-hours 100000   # 성능 평가는 수집기가 하루 한 번
 
       - name: 기록 커밋
         run: |
@@ -101,8 +101,9 @@ jobs:
           if git diff --cached --quiet; then echo "새 기록 없음"; exit 0; fi
           git commit -q -m "기록 $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M')"
           for i in 1 2 3; do
-            git push origin history && break
-            git fetch --depth 5 origin history && git rebase origin/history
+            git push origin history && exit 0
+            git fetch --depth 5 origin history
+            git rebase origin/history || { git rebase --abort; echo "::warning::수집기와 동시에 기록해 이번 기록은 건너뜀"; exit 0; }
           done
 
       - id: result
