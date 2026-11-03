@@ -1,5 +1,6 @@
-# 실제 데이터 사이트: 15분마다 공공 API로 충북 충전기 상태를 받아 기록하고, GitHub Pages에 사이트와 함께 올립니다.
-# 서버를 따로 켜 둘 필요가 없습니다.
+# 실제 데이터 사이트: 기록으로 사이트와 AI 예측(data/forecast.json)을 만들어 GitHub Pages에 올립니다.
+# 수집은 collect.yml(15분 간격 수집기)이 맡고, 수집할 때마다 이 워크플로를 불러 사이트를 갱신합니다.
+# 수집기가 멈춰 기록이 40분 넘게 비면 이 워크플로가 대신 수집합니다.
 #
 # 처음 한 번만 설정 (저장소 Settings):
 #   1. Secrets and variables > Actions > New repository secret
@@ -14,8 +15,14 @@ name: 실제 데이터 사이트
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/30 * * * *"   # 예비: 수집기가 멈췄을 때만 수집
   workflow_dispatch:
+    inputs:
+      collect:
+        description: "수집 여부 (auto: 기록이 40분 넘게 비었을 때만)"
+        default: "auto"
+        type: choice
+        options: ["auto", "true", "false"]
   push:
     branches: [main]
     paths: ["web/**", "docs/index.html", "utils/**", "scripts/**", "config.py", "data/chungbuk_sigungu.geojson", ".github/workflows/deploy.yml"]
@@ -45,7 +52,7 @@ jobs:
           cache-dependency-path: requirements-server.txt
 
       - name: 패키지 설치
-        run: pip install pandas numpy requests python-dotenv
+        run: pip install pandas numpy requests python-dotenv lightgbm scikit-learn
 
       - name: history 브랜치 준비
         run: |
@@ -58,11 +65,32 @@ jobs:
           fi
           mkdir -p hist/history
 
+      - name: 수집 여부 결정
+        id: mode
+        run: |
+          want="${{ github.event.inputs.collect || 'auto' }}"
+          if [ "$want" = "auto" ]; then
+            last=$(git -C hist log -1 --format=%ct 2>/dev/null || echo 0)
+            age=$(( $(date +%s) - last ))
+            if [ "$age" -gt 2400 ]; then want=true; else want=false; fi
+            echo "마지막 기록 $((age / 60))분 전 → 수집 $want"
+          fi
+          echo "collect=$want" >> "$GITHUB_OUTPUT"
+
       - name: 수집하고 사이트 만들기
         env:
           EV_API_KEY: ${{ secrets.EV_API_KEY }}
-          # 수동 실행·코드 변경 때도 수집. 예약 실행이 아니어도 데이터가 바로 보이도록
-        run: python -m scripts.publish_static --history hist/history --out _site
+        run: |
+          if [ "${{ steps.mode.outputs.collect }}" = "true" ]; then
+            python -m scripts.publish_static --history hist/history --out _site
+          else
+            python -m scripts.publish_static --history hist/history --out _site --no-collect
+          fi
+
+      # AI 예측: 1시간 후 충전소별 이용률 (실패해도 사이트 배포는 계속)
+      - name: AI 수요 예측
+        continue-on-error: true
+        run: python -m scripts.forecast --history hist/history --out _site/data/forecast.json --eval-every-hours 72
 
       - name: 기록 커밋
         run: |
@@ -72,7 +100,10 @@ jobs:
           git add history
           if git diff --cached --quiet; then echo "새 기록 없음"; exit 0; fi
           git commit -q -m "기록 $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M')"
-          git push origin history
+          for i in 1 2 3; do
+            git push origin history && break
+            git fetch --depth 5 origin history && git rebase origin/history
+          done
 
       - id: result
         name: 수집 결과

@@ -1262,6 +1262,34 @@ function renderPairs() {
 }
 
 // 단가 출처 한 줄: 운영사 요금표의 어느 값을 썼는지, 비회원가는 얼마인지
+// AI 예측 (data/forecast.json, scripts/forecast.py): 마지막 수집 1시간 뒤 예상 이용률 → 예상 상태·단가
+let FORECAST = null;
+async function loadForecast() {
+  const f = await getJSON("data/forecast.json");
+  if (!f || f.schema_version !== 1 || !Array.isArray(f.predictions)) return;
+  const by = new Map(f.predictions.map(p => [`${p.station_id}|${p.speed}`, p]));
+  FORECAST = { ...f, by };
+  if (state.selected) renderDetail();
+}
+function forecastNote(s) {
+  if (!FORECAST || state.hour !== liveHour()) return "";   // 지난 시간대를 재생할 때는 예측을 보여 주지 않음
+  const target = new Date(FORECAST.target_time), hh = String((target.getUTCHours() + 9) % 24).padStart(2, "0") + ":" + String(target.getUTCMinutes()).padStart(2, "0");
+  const tod = timeMult((target.getUTCHours() + 9) % 24, state.p).m;
+  const rows = [];
+  for (const [label, key, x] of [["급속", "fast", s.fast], ["완속", "slow", s.slow]]) {
+    const p = x.total && FORECAST.by.get(`${s.id}|${key}`);
+    if (!p) continue;
+    const m = congestionMult(p.status, state.p);
+    const price = m == null ? "–" : (x.base * m * tod).toFixed(1);
+    rows.push(`<tr><td>${label}</td><td>${Math.round(p.utilization * 100)}%</td><td>${Math.round((p.p_full ?? 0) * 100)}%</td>
+      <td class="c-${p.status}">${STATUS_LABEL[p.status] || p.status}</td><td>${price}</td></tr>`);
+  }
+  if (!rows.length) return "";
+  return `<h4 style="margin:14px 0 4px;font-size:14px">1시간 후 예상 (${hh}, AI 예측)</h4>
+    <table class="calc num"><thead><tr><th>구분</th><th>이용률</th><th>만차 확률</th><th>예상 상태</th><th>예상 단가</th></tr></thead><tbody>${rows.join("")}</tbody></table>
+    <p class="sub" style="margin-top:6px">${esc(FORECAST.model_name)} · 수집 기록으로 학습한 예측값이며 실제와 다를 수 있습니다.</p>`;
+}
+
 function priceNote(s) {
   const parts = [];
   for (const [label, x] of [["급속", s.fast], ["완속", s.slow]]) {
@@ -1296,6 +1324,7 @@ function renderDetail() {
     <table class="calc num"><thead><tr><th>구분</th><th>대기</th><th>회원가</th><th>배수</th><th>동적 단가</th></tr></thead>
       <tbody>${row("급속", s.fast)}${row("완속", s.slow)}</tbody></table>
     ${priceNote(s)}
+    ${forecastNote(s)}
     ${alt}
     <p class="sub" style="margin-top:10px">${esc(s.addr)}</p>`;
   el.hidden = false;
@@ -1493,6 +1522,8 @@ async function detectServer() {
   const st = await getJSON("data/status.json");
   if (st && st.ok) {
     state.server = "static"; refreshSec = st.refresh_sec || 300;
+    loadForecast();
+    setInterval(() => { if (!document.hidden) loadForecast(); }, 10 * 60 * 1000);
     if (!st.regions[state.region.code]) {   // 첫 화면 지역에 기록이 없으면 기록이 있는 지역으로
       const r = REGIONS.find(x => st.regions[x.code]); if (r) state.region = r;
     }

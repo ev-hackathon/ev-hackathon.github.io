@@ -1,0 +1,58 @@
+"""
+AI 충전 수요 예측 실행: 쌓인 기록으로 LightGBM을 학습해 마지막 수집 1시간 뒤 이용률을 예측하고
+data/forecast.json 형식(schema_version 1)으로 저장한다.
+
+성능 평가(마지막 5일을 떼어 둔 검증)는 시간이 걸리므로 하루 한 번만 다시 하고, 결과는 기록 폴더의
+forecast_metrics.json에 보관해 매번 예측 파일에 함께 싣는다.
+
+사용법 (프로젝트 루트에서):
+    python -m scripts.forecast --history hist/history --out _site/data/forecast.json
+    python -m scripts.forecast --history hist/history --out data/forecast.json --evaluate   # 평가 강제
+    python -m scripts.forecast --history hist/history --metrics-only                         # 평가만 (하루 한 번)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from utils import forecast as F
+
+KST = timezone(timedelta(hours=9))
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="충전소별 1시간 후 이용률 예측")
+    ap.add_argument("--history", required=True, help="기록 폴더 (history/)")
+    ap.add_argument("--out", help="예측 JSON 저장 경로 (--metrics-only면 생략)")
+    ap.add_argument("--metrics-only", action="store_true", help="성능 평가만 (오래됐을 때) 하고 예측은 하지 않음")
+    ap.add_argument("--evaluate", action="store_true", help="성능 평가를 지금 다시 함")
+    ap.add_argument("--eval-every-hours", type=float, default=24)
+    args = ap.parse_args(argv)
+
+    hist = Path(args.history)
+    mpath = hist / "forecast_metrics.json"
+    metrics = json.loads(mpath.read_text(encoding="utf-8")) if mpath.exists() else None
+    stale = not metrics or (datetime.now(KST) - datetime.fromisoformat(metrics["evaluated_at"])) > timedelta(hours=args.eval_every_hours)
+    t0 = time.time()
+    if args.evaluate or stale:
+        obs = F.observations(str(hist))
+        metrics = F.evaluate(obs, F.station_prices(str(hist)))
+        metrics["evaluated_at"] = datetime.now(KST).isoformat(timespec="minutes")
+        mpath.write_text(json.dumps(metrics, ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"✔ 성능 평가 ({time.time() - t0:.0f}초): RMSE 모델 {metrics['model']['RMSE']:.3f} / "
+              f"현재값 유지 {metrics['baseline_persistence']['RMSE']:.3f} / 과거 평균 {metrics['baseline_history']['RMSE']:.3f}")
+    if args.metrics_only:
+        return 0
+    out = F.forecast(str(hist), metrics=metrics)
+    p = Path(args.out)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    print(f"✔ {p} 예측 {len(out['predictions'])}건, 대상 {out['target_time']} ({time.time() - t0:.0f}초)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

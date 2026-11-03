@@ -1,0 +1,68 @@
+# 15분 간격 수집기: 한 번 켜지면 약 5시간 40분 동안 15분마다 충북 충전기 상태를 받아 history 브랜치에 쌓고,
+# 쌓을 때마다 '실제 데이터 사이트'(deploy.yml)를 불러 사이트와 AI 예측을 갱신합니다.
+#
+# 왜 이렇게 하나: GitHub 예약 실행(cron)은 붐비면 자주 건너뛰어, cron을 15분마다 걸어도 실제로는
+# 하루 3~6번밖에 돌지 않았습니다. 대신 3시간마다 수집기를 걸어 두고 수집기 안에서 15분마다 돌면,
+# 예약 실행이 몇 번 건너뛰어도 앞의 수집기가 계속 돌고 있어 간격이 일정해집니다.
+# (공개 저장소라 Actions 사용 시간은 무료)
+name: 15분 간격 수집기
+
+on:
+  schedule:
+    - cron: "11 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write     # 수집 후 사이트 갱신 워크플로 호출
+
+concurrency:
+  group: collector          # 한 번에 하나만. 다음 수집기는 앞의 것이 끝나면 이어서 시작
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 패키지 설치
+        run: pip install pandas numpy requests python-dotenv lightgbm scikit-learn
+
+      - name: history 브랜치 준비
+        run: |
+          git fetch --depth 1 origin history:history
+          git worktree add hist history
+          git -C hist config user.name "github-actions[bot]"
+          git -C hist config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: 15분마다 수집 (약 5시간 40분)
+        env:
+          EV_API_KEY: ${{ secrets.EV_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          end=$(( $(date +%s) + 340 * 60 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            python -m scripts.collect --out hist/history || echo "::warning::수집 실패, 다음 차례에 다시 시도"
+            # AI 예측 성능 평가는 하루 한 번 (결과는 기록과 함께 저장)
+            python -m scripts.forecast --history hist/history --metrics-only || echo "::warning::예측 성능 평가 실패"
+            (
+              cd hist
+              git add history
+              if ! git diff --cached --quiet; then
+                git commit -q -m "기록 $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M')"
+                for i in 1 2 3; do
+                  git push -q origin history && break
+                  git fetch -q --depth 5 origin history && git rebase -q origin/history
+                done
+              fi
+            )
+            gh workflow run deploy.yml --ref "${GITHUB_REF_NAME}" -f collect=false || echo "::warning::사이트 갱신 호출 실패"
+            # 다음 15분 정각(:00 :15 :30 :45)까지 대기
+            now=$(date +%s); sleep $(( 900 - now % 900 ))
+          done
