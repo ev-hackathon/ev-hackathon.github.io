@@ -302,6 +302,7 @@ def evaluate(obs: pd.DataFrame, price_map: dict, test_days: int = 5, asos: pd.Da
     except ImportError:
         out["xgboost"] = None
     out["one_hour"] = evaluate_one_hour(obs, price_map, asos=asos)
+    out["two_hour"] = evaluate_one_hour(obs, price_map, band=(1.75, 2.25), asos=asos)   # 2시간 뒤도 같은 방식
     # 날씨 효과: 날씨 열을 뺀 모델과 비교
     out["weather_coverage"] = float(train["temp"].notna().mean())
     if out["weather_coverage"] > 0.5:
@@ -316,7 +317,8 @@ def evaluate(obs: pd.DataFrame, price_map: dict, test_days: int = 5, asos: pd.Da
 # ─────────────────────────────────────────────────────────────
 # 5. 운영: 전체 기록으로 학습 → 마지막 수집 + 1시간 예측
 # ─────────────────────────────────────────────────────────────
-def forecast(history_dir: str, horizon_h: float = 1.0, metrics: dict | None = None) -> dict:
+def forecast(history_dir: str, horizon_h: float = 1.0, metrics: dict | None = None, horizons: tuple = ()) -> dict:
+    """horizon_h 하나면 예측 JSON 하나, horizons=(1, 2)처럼 주면 {간격: 예측 JSON} (모델은 한 번만 학습)"""
     obs = observations(history_dir)
     price_map = station_prices(history_dir)
     prof = build_profile(obs)
@@ -326,10 +328,18 @@ def forecast(history_dir: str, horizon_h: float = 1.0, metrics: dict | None = No
     last = obs.loc[obs.groupby("region")["ts"].transform("max") == obs["ts"]].dropna(subset=["u"])
     now = last.rename(columns={"ts": "ts0", "u": "u0", "f": "fault0"}).assign(usable0=lambda d: d["a"] + d["c"])
     gen = obs["ts"].max()
-    now["ts_t"] = now["ts0"] + pd.Timedelta(hours=horizon_h)
     fcst = weather.forecast_now(gen.to_pydatetime())
+    results = {}
+    for h in (horizons or (horizon_h,)):
+        results[h] = _predict(now.assign(ts_t=now["ts0"] + pd.Timedelta(hours=h)), h, gen, obs, prof, price_map, asos, fcst,
+                              reg, clf, pairs, metrics)
+    return results if horizons else results[horizon_h]
+
+
+def _predict(now, horizon_h, gen, obs, prof, price_map, asos, fcst, reg, clf, pairs, metrics):
     X = prepare(now, prof, price_map, asos, fcst)
-    w = (metrics or {}).get("one_hour", {}).get("blend_weight", DEFAULT_BLEND) if horizon_h <= 1.5 else 0.0
+    key, default = ("one_hour", DEFAULT_BLEND) if horizon_h <= 1.5 else ("two_hour", 0.3)
+    w = (metrics or {}).get(key, {}).get("blend_weight", default)
     u = w * X["u0"].to_numpy() + (1 - w) * np.clip(reg.predict(X[FEATURES]), 0, 1)
     pf = w * X["full"].to_numpy() + (1 - w) * clf.predict_proba(X[FEATURES])[:, 1]
     st = status_of(u, pf)

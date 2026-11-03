@@ -47,11 +47,13 @@ def main(argv: list[str] | None = None) -> int:
               f"현재값 유지 {metrics['baseline_persistence']['RMSE']:.3f} / 과거 평균 {metrics['baseline_history']['RMSE']:.3f}")
     if args.metrics_only:
         return 0
-    out = F.forecast(str(hist), metrics=metrics)
-    p = Path(args.out)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    print(f"✔ {p} 예측 {len(out['predictions'])}건, 대상 {out['target_time']} ({time.time() - t0:.0f}초)")
+    outs = F.forecast(str(hist), metrics=metrics, horizons=(1.0, 2.0))
+    base = Path(args.out)
+    base.parent.mkdir(parents=True, exist_ok=True)
+    for h, out in outs.items():   # 1시간: forecast.json (시뮬레이션 탭 형식), 2시간: forecast_2h.json
+        p = base if h == 1.0 else base.with_name(base.stem + "_2h" + base.suffix)
+        p.write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        print(f"✔ {p} 예측 {len(out['predictions'])}건, 대상 {out['target_time']} ({time.time() - t0:.0f}초)")
     return 0
 
 

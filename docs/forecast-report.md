@@ -4,6 +4,7 @@
 
 - 코드: `utils/forecast.py`(데이터·특징·학습·평가·예측), `scripts/forecast.py`(실행)
 - 실행: GitHub Actions가 사이트를 만들 때마다 자동 실행 → https://ev-hackathon.github.io/data/forecast.json
+- 2시간 후 예측도 같은 형식으로 함께 낸다 → https://ev-hackathon.github.io/data/forecast_2h.json (target_time = 생성 시각 + 2시간)
 - 로컬: `python -m scripts.forecast --history <history 폴더> --out data/forecast.json`
 
 ## 입력과 출력

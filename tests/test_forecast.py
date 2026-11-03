@@ -63,3 +63,13 @@ def test_weather_attach_maps_region_to_station_and_hour():
     out = weather.attach(df, asos)
     assert out["temp"].tolist()[:2] == [15.0, 12.0] and out["rain"].iat[1] == 2.5   # 청주→131, 음성→127
     assert np.isnan(out["temp"].iat[2])                                              # 제천(221) 자료 없음
+
+
+def test_two_hour_file_written(hist, tmp_path):
+    out = tmp_path / "forecast.json"
+    assert cli.main(["--history", str(hist), "--out", str(out)]) == 0
+    f1 = json.loads(out.read_text(encoding="utf-8"))
+    f2 = json.loads((tmp_path / "forecast_2h.json").read_text(encoding="utf-8"))
+    assert f1["horizon_hours"] == 1.0 and f2["horizon_hours"] == 2.0
+    assert datetime.fromisoformat(f2["target_time"]) - datetime.fromisoformat(f1["generated_at"]) == timedelta(hours=2)
+    assert len(f1["predictions"]) == len(f2["predictions"])
