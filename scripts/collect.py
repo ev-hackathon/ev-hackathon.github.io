@@ -15,7 +15,7 @@ import sys
 import time
 from datetime import datetime
 
-from utils import api, history
+from utils import api, history, sessions
 from utils.logic import KST
 
 
@@ -24,6 +24,13 @@ def collect_once(base=None) -> tuple[dict[str, int], dict[str, list[dict]], date
     by_region = api.fetch_province()
     now = datetime.now(KST)
     counts = {region: history.append(region, rows, now, base) for region, rows in by_region.items() if rows}
+    # 끝난 충전 세션 (lastTsdt·lastTedt). 세션 기록 실패가 상태 기록을 막지 않게
+    try:
+        all_rows = [r for rows in by_region.values() for r in rows]
+        new = sum(sessions.append(region, rows, base) for region, rows in by_region.items() if rows)
+        print(f"  세션 필드 응답 비율 {sessions.field_coverage(all_rows)}, 새로 끝난 충전 {new}건", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠ 세션 기록 실패: {e}", flush=True)
     return counts, by_region, now
 
 
