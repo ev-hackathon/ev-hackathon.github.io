@@ -1,0 +1,26 @@
+{
+ "setup": "평균 충전 중 대수·충전 시간: 2025-11-17~2025-12-01 (14일), 시간대 모양: 1~11월, 검증: 12월",
+ "stations": 186,
+ "station_hours": 138384,
+ "observed_total": 25883,
+ "method": {
+  "poisson_deviance": 0.5707,
+  "RMSE": 0.4556,
+  "MAE": 0.2541,
+  "total": 23017
+ },
+ "method_without_shape": {
+  "poisson_deviance": 0.6094,
+  "RMSE": 0.4667,
+  "MAE": 0.2674,
+  "total": 23017
+ },
+ "history_mean_by_hour": {
+  "poisson_deviance": 0.6349,
+  "RMSE": 0.4583,
+  "MAE": 0.229,
+  "total": 17353
+ },
+ "station_monthly_corr": 0.9784,
+ "hour_of_day_total_error": 0.1107
+}

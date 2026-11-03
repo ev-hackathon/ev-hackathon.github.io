@@ -372,8 +372,8 @@ def _predict(now, horizon_h, gen, obs, prof, price_map, asos, fcst, reg, clf, pa
     pf = w * X["full"].to_numpy() + (1 - w) * clf.predict_proba(X[FEATURES])[:, 1]
     st = status_of(u, pf)
     preds = [{"station_id": s, "speed": "fast" if f else "slow", "utilization": round(float(v), 4),
-              "p_full": round(float(q), 4), "status": str(k)}
-             for s, f, v, q, k in zip(X["statId"], X["fast"], u, pf, st)]
+              "p_full": round(float(q), 4), "status": str(k), "u_now": round(float(u0), 4), "usable": int(n), "region": str(r)}
+             for s, f, v, q, k, u0, n, r in zip(X["statId"], X["fast"], u, pf, st, X["u0"], X["usable0"], X["region"])]
     iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:00") + KST_OFFSET
     out = {"schema_version": 1, "model_name": MODEL_NAME, "generated_at": iso(gen),
            "target_time": iso(gen + pd.Timedelta(hours=horizon_h)),

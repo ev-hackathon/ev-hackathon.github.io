@@ -6,6 +6,7 @@
 - 실행: GitHub Actions가 사이트를 만들 때마다 자동 실행 → https://ev-hackathon.github.io/data/forecast.json
 - 2시간 후 예측도 같은 형식으로 함께 낸다 → https://ev-hackathon.github.io/data/forecast_2h.json (target_time = 생성 시각 + 2시간)
 - 로컬: `python -m scripts.forecast --history <history 폴더> --out data/forecast.json`
+- 15분 구간별 이용률·기대 신규 충전 건수(시뮬레이션 v2 계약) → https://ev-hackathon.github.io/data/forecast_v2.json, 입출력 전체 명세는 [forecast-io.md](forecast-io.md)
 
 ## 입력과 출력
 

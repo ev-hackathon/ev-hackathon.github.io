@@ -18,7 +18,9 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from utils import forecast as F, weather
+import pandas as pd
+
+from utils import demand, forecast as F, sessions, weather
 
 KST = timezone(timedelta(hours=9))
 
@@ -54,6 +56,19 @@ def main(argv: list[str] | None = None) -> int:
         p = base if h == 1.0 else base.with_name(base.stem + "_2h" + base.suffix)
         p.write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         print(f"✔ {p} 예측 {len(out['predictions'])}건, 대상 {out['target_time']} ({time.time() - t0:.0f}초)")
+    # 시뮬레이션 v2 계약: 15분 구간별 이용률 + 기대 신규 충전 건수 (세션 기록이 있을 때만)
+    sess = sessions.load(hist)
+    if len(sess):
+        gen = pd.Timestamp(outs[1.0]["generated_at"]).tz_localize(None)
+        obs = F.observations(str(hist))
+        try:
+            val = demand.evaluate_starts(obs, sess, demand.recording_since(hist), gen)
+        except Exception as e:   # 검증 실패가 예측 파일을 막지 않게
+            val = {"error": f"{type(e).__name__}: {e}"}
+        v2 = demand.build_v2(outs[1.0], outs[2.0], obs, sess, validation=val)
+        p = base.with_name(base.stem + "_v2" + base.suffix)
+        p.write_text(json.dumps(v2, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        print(f"✔ {p} 15분 구간 {len(v2['predictions'])}행, 충전 시간 {v2['duration_minutes']}, 검증 {val}")
     return 0
 
 

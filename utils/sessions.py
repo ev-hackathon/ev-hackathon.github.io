@@ -80,6 +80,9 @@ def append(region: str, rows: list[dict], base: Path | str | None = None) -> int
             path.parent.mkdir(parents=True, exist_ok=True)
             part.to_csv(path, mode="a", header=not path.exists(), index=False, encoding="utf-8")
     last_path.parent.mkdir(parents=True, exist_ok=True)
+    meta = root / "sessions" / "meta.json"   # 이 시각 이후 끝난 충전은 빠짐없이 기록됨 (첫 기록 시각)
+    if not meta.exists():
+        meta.write_text(json.dumps({"recording_since": f"{now_limit - timedelta(minutes=10):%Y-%m-%d %H:%M:%S}"}), encoding="utf-8")
     last_path.write_text(json.dumps(seen, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     return len(new)
 
