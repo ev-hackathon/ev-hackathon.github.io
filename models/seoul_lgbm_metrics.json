@@ -1,0 +1,20 @@
+{
+ "stations": 213,
+ "n_train": 1554048,
+ "n_test": 158259,
+ "best_iteration": 311,
+ "test_dec_2025": {
+  "model": {
+   "MAE": 0.0871,
+   "RMSE": 0.1681
+  },
+  "model_sparse_lags": {
+   "MAE": 0.0891,
+   "RMSE": 0.172
+  },
+  "baseline_persistence": {
+   "MAE": 0.0884,
+   "RMSE": 0.2082
+  }
+ }
+}

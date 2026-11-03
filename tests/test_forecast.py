@@ -73,3 +73,19 @@ def test_two_hour_file_written(hist, tmp_path):
     assert f1["horizon_hours"] == 1.0 and f2["horizon_hours"] == 2.0
     assert datetime.fromisoformat(f2["target_time"]) - datetime.fromisoformat(f1["generated_at"]) == timedelta(hours=2)
     assert len(f1["predictions"]) == len(f2["predictions"])
+
+
+def test_seoul_lag_features_and_model_file():
+    import pandas as pd
+    from utils import seoul
+    ts = pd.to_datetime(["2026-10-20 10:00", "2026-10-20 11:05", "2026-10-20 12:00", "2026-10-21 10:10"])
+    obs = pd.DataFrame({"statId": "A", "fast": 1, "ts": ts, "u": [0.1, 0.2, 0.3, 0.4]})
+    lag = seoul.lag_features(obs).set_index("ts")
+    assert lag.at[ts[2], "util_lag_1"] == 0.2           # 55분 전 기록 (20분 허용)
+    assert lag.at[ts[2], "util_lag_2"] == 0.1
+    assert lag.at[ts[3], "util_lag_24"] == 0.1          # 24시간 10분 전 (45분 허용)
+    assert np.isnan(lag.at[ts[0], "util_lag_1"])
+    bst = seoul.load_model()
+    assert bst is not None                               # 저장소에 학습된 서울 모델이 있어야 함
+    p = seoul.predict_1h(bst, obs.join(lag.reset_index(drop=True)[[f"util_lag_{h}" for h in seoul.LAGS]]))
+    assert ((p >= 0) & (p <= 1)).all() and len(p) == 4

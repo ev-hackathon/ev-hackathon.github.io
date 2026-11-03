@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 import config
-from utils import history, prices, weather
+from utils import history, prices, seoul, weather
 
 KST_OFFSET = "+09:00"
 MIN_H, MAX_H = 0.5, 8.0          # 학습에 쓰는 예측 간격(시간)
@@ -29,8 +29,10 @@ FEATURES = ["u0", "usable0", "fault0", "fast", "price", "horizon", "hour0", "hou
             "prev_u", "prev_gap", "recent24",
             "temp", "rain", "humid"]          # 날씨: 예측 대상 시각의 기온·강수량·습도 (utils/weather.py)
 MAX_TRAIN = 700_000              # 학습 짝이 이보다 많으면 무작위 추출 (Actions 실행 시간 제한)
-MODEL_NAME = "LightGBM 이용률 예측 v2 (현재값 결합)"
-DEFAULT_BLEND = 0.5            # 1시간 예측 = w × 현재 이용률 + (1 − w) × LightGBM. w는 1시간 검증으로 정함
+MODEL_NAME = "통합 예측 v3 (충북 LightGBM + 서울 사전학습 + 현재값)"
+DEFAULT_BLEND = 0.5            # (이전 버전 호환) 현재값 비율
+# 최종 예측 = a × 현재 이용률 + b × 충북 LightGBM + c × 서울 사전학습 모델 (a+b+c=1, 1시간 검증으로 정함)
+DEFAULT_WEIGHTS = {"current": 0.4, "lgbm": 0.4, "seoul": 0.2}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -66,7 +68,19 @@ def observations(history_dir: str) -> pd.DataFrame:
     obs["prev_u"] = g["u"].shift(1)
     obs["prev_gap"] = (obs["ts"] - g["ts"].shift(1)).dt.total_seconds() / 3600
     r = obs.set_index("ts").groupby(["statId", "fast"])["u"].rolling("24h").mean().rename("recent24").reset_index()
-    return obs.merge(r, on=["statId", "fast", "ts"], how="left")
+    obs = obs.merge(r, on=["statId", "fast", "ts"], how="left")
+    return add_seoul(obs)
+
+
+def add_seoul(obs: pd.DataFrame) -> pd.DataFrame:
+    """서울 사전학습 모델(utils/seoul.py)의 1시간 뒤 예측을 관측마다 붙인다 (모델 파일이 없으면 빈 값)."""
+    obs = obs.merge(seoul.lag_features(obs), on=["statId", "fast", "ts"], how="left")
+    obs["seoul_1h"] = np.nan
+    bst = seoul.load_model()
+    m = obs["u"].notna()
+    if bst is not None and m.any():
+        obs.loc[m, "seoul_1h"] = seoul.predict_1h(bst, obs[m])
+    return obs
 
 
 def station_prices(history_dir: str) -> dict:
@@ -227,21 +241,32 @@ def evaluate_one_hour(obs: pd.DataFrame, price_map: dict, band=(0.75, 1.25), min
     if preds:
         allp = pd.concat(preds)
         y, u0, pm = allp["y"].to_numpy(), allp["u0"].to_numpy(), allp["p"].to_numpy()
-        # 현재값과 모델의 결합 비율: 1시간 검증에서 RMSE가 가장 낮은 값 (날마다 같은 무게로)
-        grid = np.round(np.arange(0, 1.01, 0.1), 1)
+        sp = allp["seoul_1h"].fillna(allp["p"]).to_numpy() if "seoul_1h" in allp else pm   # 서울 예측이 없으면 충북 모델로
+        # 결합 비율 (현재값, 충북 LightGBM, 서울): 날마다 같은 무게로 본 RMSE가 가장 낮은 조합 (0.1 단위)
         day_w = allp["ts0"].dt.normalize().map(1 / allp["ts0"].dt.normalize().value_counts()).to_numpy()
-        wr = lambda w: float(np.sqrt(np.average((y - (w * u0 + (1 - w) * pm)) ** 2, weights=day_w)))
-        w = float(min(grid, key=wr))
-        bl = w * u0 + (1 - w) * pm
-        bf = w * allp["full0"].to_numpy() + (1 - w) * allp["pf"].to_numpy()
+        grid = [(a, b, round(1 - a - b, 1)) for a in np.round(np.arange(0, 1.01, 0.1), 1)
+                for b in np.round(np.arange(0, 1.01, 0.1), 1) if a + b <= 1.0001]
+        mix = lambda w: w[0] * u0 + w[1] * pm + w[2] * sp
+        wr = lambda w: float(np.sqrt(np.average((y - mix(w)) ** 2, weights=day_w)))
+        a, b, c = (float(v) for v in min(grid, key=wr))
+        bl = mix((a, b, c))
         true_st = status_of(y, allp["y_full"].to_numpy().astype(float))
-        out["blend_weight"] = w
-        out["pooled"] = {"n": int(len(allp)), "model": _err(y, pm), "blend": _err(y, bl),
+        # 만차 확률은 따로: 현재 만차 여부와 분류 모델을 섞는 비율을 상태(여유/보통/혼잡) 정확도가 가장 높게
+        f0, pfa = allp["full0"].to_numpy().astype(float), allp["pf"].to_numpy()
+        sacc = lambda k: float(np.average(status_of(bl, k * f0 + (1 - k) * pfa) == true_st, weights=day_w))
+        k = float(max(np.round(np.arange(0, 1.01, 0.1), 1), key=sacc))
+        bf = k * f0 + (1 - k) * pfa
+        out["weights"] = {"current": a, "lgbm": b, "seoul": c, "full_current": k}
+        out["blend_weight"] = a
+        out["pooled"] = {"n": int(len(allp)), "model": _err(y, pm), "seoul_alone": _err(y, sp),
+                         "blend_current_lgbm": _err(y, 0.5 * u0 + 0.5 * pm), "blend": _err(y, bl),
                          "baseline_persistence": _err(y, u0),
                          "baseline_history": _err(y, allp["hist_dow_hour"].to_numpy()),
                          "status_accuracy": {"blend": float(np.mean(status_of(bl, bf) == true_st)),
-                                             "persistence": float(np.mean(status_of(u0, allp["full0"].to_numpy().astype(float)) == true_st))},
-                         "rmse_by_weight": {f"{g:.1f}": round(wr(g), 4) for g in grid}}
+                                             "persistence": float(np.mean(status_of(u0, allp["full0"].to_numpy().astype(float)) == true_st))}}
+        out["by_day"] = {str(d.date()): {"blend": _err(y[m], bl[m]), "persistence": _err(y[m], u0[m]),
+                                         "blend_current_lgbm": _err(y[m], 0.5 * u0[m] + 0.5 * pm[m]), "seoul_alone": _err(y[m], sp[m])}
+                         for d in days for m in [(allp["ts0"].dt.normalize() == d).to_numpy()]}
     return out
 
 
@@ -338,9 +363,12 @@ def forecast(history_dir: str, horizon_h: float = 1.0, metrics: dict | None = No
 
 def _predict(now, horizon_h, gen, obs, prof, price_map, asos, fcst, reg, clf, pairs, metrics):
     X = prepare(now, prof, price_map, asos, fcst)
-    key, default = ("one_hour", DEFAULT_BLEND) if horizon_h <= 1.5 else ("two_hour", 0.3)
-    w = (metrics or {}).get(key, {}).get("blend_weight", default)
-    u = w * X["u0"].to_numpy() + (1 - w) * np.clip(reg.predict(X[FEATURES]), 0, 1)
+    key = "one_hour" if horizon_h <= 1.5 else "two_hour"
+    wts = (metrics or {}).get(key, {}).get("weights") or (DEFAULT_WEIGHTS if key == "one_hour" else {"current": 0.3, "lgbm": 0.5, "seoul": 0.2})
+    lg = np.clip(reg.predict(X[FEATURES]), 0, 1)
+    sp = pd.Series(X["seoul_1h"].to_numpy() if "seoul_1h" in X else np.full(len(X), np.nan)).fillna(pd.Series(lg)).to_numpy()
+    u = wts["current"] * X["u0"].to_numpy() + wts["lgbm"] * lg + wts["seoul"] * sp
+    w = wts.get("full_current", wts["current"])
     pf = w * X["full"].to_numpy() + (1 - w) * clf.predict_proba(X[FEATURES])[:, 1]
     st = status_of(u, pf)
     preds = [{"station_id": s, "speed": "fast" if f else "slow", "utilization": round(float(v), 4),
@@ -349,7 +377,7 @@ def _predict(now, horizon_h, gen, obs, prof, price_map, asos, fcst, reg, clf, pa
     iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:00") + KST_OFFSET
     out = {"schema_version": 1, "model_name": MODEL_NAME, "generated_at": iso(gen),
            "target_time": iso(gen + pd.Timedelta(hours=horizon_h)),
-           "horizon_hours": horizon_h, "n_train_pairs": int(len(pairs)), "blend_weight": w,
+           "horizon_hours": horizon_h, "n_train_pairs": int(len(pairs)), "blend_weight": w, "weights": wts,
            "data_period": [iso(obs["ts"].min()), iso(gen)],
            "weather": {"train_coverage": round(float(pairs["temp"].notna().mean()), 3),
                        "forecast_available": bool(X["temp"].notna().any())},
