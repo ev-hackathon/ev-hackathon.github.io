@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -50,12 +50,13 @@ def append(region: str, rows: list[dict], base: Path | str | None = None) -> int
     code = config.REGIONS[region]["code"]
     last_path = root / "sessions" / "last" / f"{code}.json"
     seen = json.loads(last_path.read_text(encoding="utf-8")) if last_path.exists() else {}
+    now_limit = datetime.now(logic.KST).replace(tzinfo=None) + timedelta(minutes=10)
     new = []
     for r in rows:
         if str(r.get("delYn", "")).upper() == "Y":
             continue
         start, end = _ts(r.get("lastTsdt")), _ts(r.get("lastTedt"))
-        if not start or not end or end <= start:
+        if not start or not end or end <= start or end > now_limit:   # 미래 종료 시각(기기 시계 오류)은 버림
             continue
         minutes = (end - start).total_seconds() / 60
         if minutes > MAX_MINUTES:

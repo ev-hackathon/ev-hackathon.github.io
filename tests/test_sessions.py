@@ -16,3 +16,7 @@ def test_new_sessions_recorded_once(tmp_path):
     assert len(df) == 3 and set(df["speed"]) == {"급속", "완속"}
     assert df.loc[df["chgerId"] == "02", "minutes"].iat[0] == 90.0
     assert sessions.field_coverage(rows)["lastTsdt"] == 0.75
+
+
+def test_future_end_is_dropped(tmp_path):
+    assert sessions.append("청주시", [row("A", "01", "20991104100000", "20991104104500")], tmp_path) == 0
