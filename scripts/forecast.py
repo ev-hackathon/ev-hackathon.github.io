@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from utils import forecast as F
+from utils import forecast as F, weather
 
 KST = timezone(timedelta(hours=9))
 
@@ -39,7 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     t0 = time.time()
     if args.evaluate or stale:
         obs = F.observations(str(hist))
-        metrics = F.evaluate(obs, F.station_prices(str(hist)))
+        asos = weather.load_asos(str(hist), obs["ts"].min().to_pydatetime(), obs["ts"].max().to_pydatetime())
+        metrics = F.evaluate(obs, F.station_prices(str(hist)), asos=asos)
         metrics["evaluated_at"] = datetime.now(KST).isoformat(timespec="minutes")
         mpath.write_text(json.dumps(metrics, ensure_ascii=False, indent=1), encoding="utf-8")
         print(f"✔ 성능 평가 ({time.time() - t0:.0f}초): RMSE 모델 {metrics['model']['RMSE']:.3f} / "

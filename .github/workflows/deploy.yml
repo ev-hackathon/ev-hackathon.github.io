@@ -90,6 +90,8 @@ jobs:
       # AI 예측: 1시간 후 충전소별 이용률 (실패해도 사이트 배포는 계속)
       - name: AI 수요 예측
         continue-on-error: true
+        env:
+          EV_API_KEY: ${{ secrets.EV_API_KEY }}   # 날씨(기상청) 자료도 같은 공공데이터포털 키
         run: python -m scripts.forecast --history hist/history --out _site/data/forecast.json --eval-every-hours 100000   # 성능 평가는 수집기가 하루 한 번
 
       - name: 기록 커밋

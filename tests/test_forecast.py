@@ -52,3 +52,14 @@ def test_forecast_json_contract(hist, tmp_path):
         assert p["speed"] in ("fast", "slow") and 0 <= p["utilization"] <= 1 and 0 <= p["p_full"] <= 1
         assert p["status"] in ("여유", "보통", "혼잡")
     assert (hist / "forecast_metrics.json").exists() and "RMSE" in f["metrics"]["model"]
+
+
+def test_weather_attach_maps_region_to_station_and_hour():
+    import pandas as pd
+    from utils import weather
+    asos = pd.DataFrame({"stn": [131, 127], "ts": pd.to_datetime(["2026-10-20 13:00", "2026-10-20 13:00"]),
+                         "temp": [15.0, 12.0], "rain": [0.0, 2.5], "humid": [60.0, 80.0]})
+    df = pd.DataFrame({"region": [43110, 43770, 43150], "ts_t": pd.to_datetime(["2026-10-20 13:40"] * 3)})
+    out = weather.attach(df, asos)
+    assert out["temp"].tolist()[:2] == [15.0, 12.0] and out["rain"].iat[1] == 2.5   # 청주→131, 음성→127
+    assert np.isnan(out["temp"].iat[2])                                              # 제천(221) 자료 없음

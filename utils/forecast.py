@@ -20,15 +20,17 @@ import numpy as np
 import pandas as pd
 
 import config
-from utils import history, prices
+from utils import history, prices, weather
 
 KST_OFFSET = "+09:00"
 MIN_H, MAX_H = 0.5, 8.0          # 학습에 쓰는 예측 간격(시간)
 FEATURES = ["u0", "usable0", "fault0", "fast", "price", "horizon", "hour0", "hour_t", "dow_t", "weekend_t",
             "hist_hour", "hist_dow_hour", "hist_mean", "hist_full", "hist_n", "region",
-            "prev_u", "prev_gap", "recent24"]
+            "prev_u", "prev_gap", "recent24",
+            "temp", "rain", "humid"]          # 날씨: 예측 대상 시각의 기온·강수량·습도 (utils/weather.py)
 MAX_TRAIN = 700_000              # 학습 짝이 이보다 많으면 무작위 추출 (Actions 실행 시간 제한)
-MODEL_NAME = "LightGBM 이용률 예측 v1"
+MODEL_NAME = "LightGBM 이용률 예측 v2 (현재값 결합)"
+DEFAULT_BLEND = 0.5            # 1시간 예측 = w × 현재 이용률 + (1 − w) × LightGBM. w는 1시간 검증으로 정함
 
 
 # ─────────────────────────────────────────────────────────────
@@ -134,6 +136,13 @@ def add_features(df: pd.DataFrame, prof: Profile, price_map: dict) -> pd.DataFra
     return df
 
 
+def prepare(pairs: pd.DataFrame, prof: Profile, price_map: dict, asos: pd.DataFrame | None,
+            fcst: pd.DataFrame | None = None) -> pd.DataFrame:
+    """특징 + 날씨. 날씨 자료가 없으면 날씨 열은 비워 둔다 (LightGBM이 빈 값을 처리)."""
+    df = add_features(pairs, prof, price_map)
+    return weather.attach(df, asos if asos is not None else pd.DataFrame(columns=["stn", "ts", *weather.COLS]), fcst=fcst)
+
+
 # ─────────────────────────────────────────────────────────────
 # 3. 학습용 짝: 지금 상태(t0) → h시간 뒤 이용률(t)
 # ─────────────────────────────────────────────────────────────
@@ -154,21 +163,86 @@ def make_pairs(obs: pd.DataFrame) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────
 # 4. 학습 · 평가
 # ─────────────────────────────────────────────────────────────
-def _models():
+def _models(algo: str = "lightgbm"):
+    if algo == "xgboost":
+        import xgboost as xgb
+        common = dict(n_estimators=400, learning_rate=0.05, max_depth=6, min_child_weight=50, subsample=0.8,
+                      colsample_bytree=0.8, random_state=42, tree_method="hist", n_jobs=-1)
+        return xgb.XGBRegressor(objective="reg:squarederror", **common), xgb.XGBClassifier(objective="binary:logistic", **common)
     import lightgbm as lgb
     common = dict(n_estimators=400, learning_rate=0.05, num_leaves=31, min_child_samples=50,
                   subsample=0.8, subsample_freq=1, colsample_bytree=0.8, random_state=42, verbose=-1)
     return lgb.LGBMRegressor(objective="regression", **common), lgb.LGBMClassifier(objective="binary", **common)
 
 
-def fit(train: pd.DataFrame):
+def fit(train: pd.DataFrame, algo: str = "lightgbm"):
     if len(train) > MAX_TRAIN:
         train = train.sample(MAX_TRAIN, random_state=0)
-    reg, clf = _models()
+    reg, clf = _models(algo)
     X = train[FEATURES]
-    reg.fit(X, train["y"], categorical_feature=["region"])
-    clf.fit(X, train["y_full"], categorical_feature=["region"])
+    if algo == "xgboost":
+        reg.fit(X, train["y"]); clf.fit(X, train["y_full"])
+    else:
+        reg.fit(X, train["y"], categorical_feature=["region"])
+        clf.fit(X, train["y_full"], categorical_feature=["region"])
     return reg, clf
+
+
+def _score(test: pd.DataFrame, reg, clf) -> dict:
+    """한 검증 세트에 대한 모델·기준선 성능"""
+    from sklearn.metrics import roc_auc_score
+    p = np.clip(reg.predict(test[FEATURES]), 0, 1)
+    pf = clf.predict_proba(test[FEATURES])[:, 1]
+    y, yf = test["y"].to_numpy(), test["y_full"].to_numpy()
+    true_st = status_of(y, yf.astype(float))
+    return {"n": int(len(test)), "model": _err(y, p),
+            "baseline_persistence": _err(y, test["u0"].to_numpy()),
+            "baseline_history": _err(y, test["hist_dow_hour"].to_numpy()),
+            "status_accuracy": {"model": float(np.mean(status_of(p, pf) == true_st)),
+                                "persistence": float(np.mean(status_of(test["u0"].to_numpy(), test["full0"].to_numpy().astype(float)) == true_st))},
+            "full_auc": float(roc_auc_score(yf, pf)) if yf.min() != yf.max() else None}
+
+
+def evaluate_one_hour(obs: pd.DataFrame, price_map: dict, band=(0.75, 1.25), min_pairs: int = 2000, max_days: int = 3,
+                      asos: pd.DataFrame | None = None) -> dict:
+    """정확히 '1시간 뒤'(45~75분) 성능. 수집이 촘촘했던 날을 하루씩 통째로 빼고 나머지 날로 학습해 그날로 검증한다."""
+    pairs_all = make_pairs(obs)
+    h = (pairs_all["ts_t"] - pairs_all["ts0"]).dt.total_seconds() / 3600
+    near = pairs_all[(h >= band[0]) & (h <= band[1])]
+    counts = near.groupby(near["ts0"].dt.normalize()).size()
+    days = sorted(counts[counts >= min_pairs].index)[-max_days:]
+    out = {"band_hours": list(band), "days": [], "pooled": None, "blend_weight": DEFAULT_BLEND}
+    preds = []
+    for d in days:
+        nd = d + pd.Timedelta(days=1)
+        other = obs[(obs["ts"] < d) | (obs["ts"] >= nd)]
+        prof = build_profile(other)
+        pairs = prepare(pairs_all, prof, price_map, asos)
+        touches = ((pairs["ts0"] >= d) & (pairs["ts0"] < nd)) | ((pairs["ts_t"] >= d) & (pairs["ts_t"] < nd))
+        test = pairs[(pairs["ts0"] >= d) & (pairs["ts0"] < nd) & pairs["horizon"].between(*band)]
+        reg, clf = fit(pairs[~touches])
+        r = _score(test, reg, clf); r["day"] = str(d.date())
+        out["days"].append(r)
+        preds.append(test.assign(p=np.clip(reg.predict(test[FEATURES]), 0, 1), pf=clf.predict_proba(test[FEATURES])[:, 1]))
+    if preds:
+        allp = pd.concat(preds)
+        y, u0, pm = allp["y"].to_numpy(), allp["u0"].to_numpy(), allp["p"].to_numpy()
+        # 현재값과 모델의 결합 비율: 1시간 검증에서 RMSE가 가장 낮은 값 (날마다 같은 무게로)
+        grid = np.round(np.arange(0, 1.01, 0.1), 1)
+        day_w = allp["ts0"].dt.normalize().map(1 / allp["ts0"].dt.normalize().value_counts()).to_numpy()
+        wr = lambda w: float(np.sqrt(np.average((y - (w * u0 + (1 - w) * pm)) ** 2, weights=day_w)))
+        w = float(min(grid, key=wr))
+        bl = w * u0 + (1 - w) * pm
+        bf = w * allp["full0"].to_numpy() + (1 - w) * allp["pf"].to_numpy()
+        true_st = status_of(y, allp["y_full"].to_numpy().astype(float))
+        out["blend_weight"] = w
+        out["pooled"] = {"n": int(len(allp)), "model": _err(y, pm), "blend": _err(y, bl),
+                         "baseline_persistence": _err(y, u0),
+                         "baseline_history": _err(y, allp["hist_dow_hour"].to_numpy()),
+                         "status_accuracy": {"blend": float(np.mean(status_of(bl, bf) == true_st)),
+                                             "persistence": float(np.mean(status_of(u0, allp["full0"].to_numpy().astype(float)) == true_st))},
+                         "rmse_by_weight": {f"{g:.1f}": round(wr(g), 4) for g in grid}}
+    return out
 
 
 def status_of(u: np.ndarray, p_full: np.ndarray, th: float = config.DEFAULT_POLICY.discount_threshold) -> np.ndarray:
@@ -180,13 +254,13 @@ def _err(y, p):
     return {"MAE": float(np.mean(np.abs(y - p))), "RMSE": float(np.sqrt(np.mean((y - p) ** 2)))}
 
 
-def evaluate(obs: pd.DataFrame, price_map: dict, test_days: int = 5) -> dict:
+def evaluate(obs: pd.DataFrame, price_map: dict, test_days: int = 5, asos: pd.DataFrame | None = None) -> dict:
     """마지막 test_days일을 떼어 두고 학습 → 기준선과 비교 (기록이 짧으면 전체의 1/4 정도만 떼어 둠)"""
     span = (obs["ts"].max().normalize() - obs["ts"].min().normalize()).days + 1
     test_days = max(1, min(test_days, span // 4))
     cut = obs["ts"].max().normalize() - pd.Timedelta(days=test_days - 1)
     prof = build_profile(obs[obs["ts"] < cut])
-    pairs = add_features(make_pairs(obs), prof, price_map)
+    pairs = prepare(make_pairs(obs), prof, price_map, asos)
     train = pairs[(pairs["ts_t"] < cut)]
     test = pairs[(pairs["ts0"] >= cut)]
     reg, clf = fit(train)
@@ -221,6 +295,21 @@ def evaluate(obs: pd.DataFrame, price_map: dict, test_days: int = 5) -> dict:
                              "base_rate": float(yf.mean())}
     imp = pd.Series(reg.booster_.feature_importance("gain"), index=FEATURES)
     out["importance"] = (imp / imp.sum()).round(4).sort_values(ascending=False).to_dict()
+    # 같은 조건으로 XGBoost와 비교 (설치돼 있을 때만)
+    try:
+        xr, xc = fit(train, "xgboost")
+        out["xgboost"] = _score(test, xr, xc)
+    except ImportError:
+        out["xgboost"] = None
+    out["one_hour"] = evaluate_one_hour(obs, price_map, asos=asos)
+    # 날씨 효과: 날씨 열을 뺀 모델과 비교
+    out["weather_coverage"] = float(train["temp"].notna().mean())
+    if out["weather_coverage"] > 0.5:
+        keep = [f for f in FEATURES if f not in weather.COLS]
+        r0, _ = _models()
+        tr = train.sample(min(len(train), MAX_TRAIN), random_state=0)
+        r0.fit(tr[keep], tr["y"], categorical_feature=["region"])
+        out["without_weather"] = _err(test["y"].to_numpy(), np.clip(r0.predict(test[keep]), 0, 1))
     return out
 
 
@@ -231,15 +320,18 @@ def forecast(history_dir: str, horizon_h: float = 1.0, metrics: dict | None = No
     obs = observations(history_dir)
     price_map = station_prices(history_dir)
     prof = build_profile(obs)
-    pairs = add_features(make_pairs(obs), prof, price_map)
+    asos = weather.load_asos(history_dir, obs["ts"].min().to_pydatetime(), obs["ts"].max().to_pydatetime())
+    pairs = prepare(make_pairs(obs), prof, price_map, asos)
     reg, clf = fit(pairs)
     last = obs.loc[obs.groupby("region")["ts"].transform("max") == obs["ts"]].dropna(subset=["u"])
     now = last.rename(columns={"ts": "ts0", "u": "u0", "f": "fault0"}).assign(usable0=lambda d: d["a"] + d["c"])
     gen = obs["ts"].max()
     now["ts_t"] = now["ts0"] + pd.Timedelta(hours=horizon_h)
-    X = add_features(now, prof, price_map)
-    u = np.clip(reg.predict(X[FEATURES]), 0, 1)
-    pf = clf.predict_proba(X[FEATURES])[:, 1]
+    fcst = weather.forecast_now(gen.to_pydatetime())
+    X = prepare(now, prof, price_map, asos, fcst)
+    w = (metrics or {}).get("one_hour", {}).get("blend_weight", DEFAULT_BLEND) if horizon_h <= 1.5 else 0.0
+    u = w * X["u0"].to_numpy() + (1 - w) * np.clip(reg.predict(X[FEATURES]), 0, 1)
+    pf = w * X["full"].to_numpy() + (1 - w) * clf.predict_proba(X[FEATURES])[:, 1]
     st = status_of(u, pf)
     preds = [{"station_id": s, "speed": "fast" if f else "slow", "utilization": round(float(v), 4),
               "p_full": round(float(q), 4), "status": str(k)}
@@ -247,8 +339,11 @@ def forecast(history_dir: str, horizon_h: float = 1.0, metrics: dict | None = No
     iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:00") + KST_OFFSET
     out = {"schema_version": 1, "model_name": MODEL_NAME, "generated_at": iso(gen),
            "target_time": iso(gen + pd.Timedelta(hours=horizon_h)),
-           "horizon_hours": horizon_h, "n_train_pairs": int(len(pairs)),
-           "data_period": [iso(obs["ts"].min()), iso(gen)], "predictions": preds}
+           "horizon_hours": horizon_h, "n_train_pairs": int(len(pairs)), "blend_weight": w,
+           "data_period": [iso(obs["ts"].min()), iso(gen)],
+           "weather": {"train_coverage": round(float(pairs["temp"].notna().mean()), 3),
+                       "forecast_available": bool(X["temp"].notna().any())},
+           "predictions": preds}
     if metrics:
         out["metrics"] = metrics
     return out
