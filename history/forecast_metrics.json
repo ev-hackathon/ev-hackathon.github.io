@@ -221,7 +221,7 @@
     "RMSE": 0.28928186435189823
    },
    "status_accuracy": {
-    "blend": 0.9070976747188201,
+    "blend": 0.9288,
     "persistence": 0.9338279195107388
    }
   },
@@ -229,7 +229,8 @@
   "weights": {
    "current": 0.2,
    "lgbm": 0.4,
-   "seoul": 0.4
+   "seoul": 0.4,
+   "full_current": 0.5
   },
   "by_day": {
    "2026-10-15": {
@@ -393,7 +394,8 @@
   "weights": {
    "current": 0.0,
    "lgbm": 0.4,
-   "seoul": 0.6
+   "seoul": 0.6,
+   "full_current": 0.5
   },
   "by_day": {
    "2026-10-19": {
