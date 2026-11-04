@@ -67,3 +67,12 @@ jobs:
             # 다음 15분 정각(:00 :15 :30 :45)까지 대기
             now=$(date +%s); sleep $(( 900 - now % 900 ))
           done
+
+      # 끝나기 직전에 다음 수집기를 직접 예약 (이어달리기). 예약 실행(cron)은 밤에 몇 시간씩 건너뛰는 일이 있어
+      # 2026-11-05 새벽 2시간 넘게 수집이 비었음. cron은 예비로 남겨 둠 (같은 concurrency 그룹이라 겹치지 않음).
+      # 멈추려면: Actions 탭에서 실행 중인 수집기를 Cancel (취소하면 다음 수집기를 부르지 않음)
+      - name: 다음 수집기 예약
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run collect.yml --ref "${GITHUB_REF_NAME}" || echo "::warning::다음 수집기 예약 실패 (cron 예비 실행을 기다림)"
