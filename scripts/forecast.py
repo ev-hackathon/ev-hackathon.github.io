@@ -61,11 +61,12 @@ def main(argv: list[str] | None = None) -> int:
     if len(sess):
         gen = pd.Timestamp(outs[1.0]["generated_at"]).tz_localize(None)
         obs = F.observations(str(hist))
+        windows = demand.dense_windows(hist)
         try:
-            val = demand.evaluate_starts(obs, sess, demand.recording_since(hist), gen)
+            val = demand.evaluate_starts(obs, sess, windows, gen)
         except Exception as e:   # 검증 실패가 예측 파일을 막지 않게
             val = {"error": f"{type(e).__name__}: {e}"}
-        v2 = demand.build_v2(outs[1.0], outs[2.0], obs, sess, validation=val)
+        v2 = demand.build_v2(outs[1.0], outs[2.0], obs, sess, validation=val, windows=windows)
         p = base.with_name(base.stem + "_v2" + base.suffix)
         p.write_text(json.dumps(v2, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         print(f"✔ {p} 15분 구간 {len(v2['predictions'])}행, 충전 시간 {v2['duration_minutes']}, 검증 {val}")

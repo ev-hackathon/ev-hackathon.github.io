@@ -89,3 +89,21 @@ def test_seoul_lag_features_and_model_file():
     assert bst is not None                               # 저장소에 학습된 서울 모델이 있어야 함
     p = seoul.predict_1h(bst, obs.join(lag.reset_index(drop=True)[[f"util_lag_{h}" for h in seoul.LAGS]]))
     assert ((p >= 0) & (p <= 1)).all() and len(p) == 4
+
+
+def test_thin_run_pairs_caps_rows_and_keeps_near_pairs():
+    import pandas as pd
+    t = pd.date_range("2026-11-04", periods=200, freq="15min")
+    runs = pd.DataFrame({"region": "43110", "ts": t})
+    rp = runs.merge(runs, on="region", suffixes=("0", "_t"))
+    h = (rp["ts_t"] - rp["ts0"]).dt.total_seconds() / 3600
+    rp = rp[(h >= 0.5) & (h <= 8)]
+    per = pd.Series(10, index=pd.MultiIndex.from_frame(runs[["region", "ts"]]))   # 시각마다 충전소 10곳
+    total = len(rp) * 10
+    out = F._thin_run_pairs(rp, per, max_pairs=total // 4)
+    rows = len(out) * 10
+    assert abs(rows - total // 4) < total * 0.03                      # 예산 안팎
+    near = lambda d: ((d["ts_t"] - d["ts0"]).dt.total_seconds() / 3600 <= F.NEAR_H).mean()
+    assert near(out) > near(rp)                                       # 짧은 간격 비중이 늘어남
+    assert F._thin_run_pairs(rp, per, max_pairs=total * 2) is rp      # 예산 안이면 그대로
+    pd.testing.assert_frame_equal(out, F._thin_run_pairs(rp, per, max_pairs=total // 4))   # 재현 가능

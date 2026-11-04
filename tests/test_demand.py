@@ -65,27 +65,32 @@ def test_build_v2_contract():
 
 def test_evaluate_starts_waits_for_data():
     now = pd.Timestamp("2026-11-03 12:00")
-    v = demand.evaluate_starts(_obs(now), _sessions(now), now - pd.Timedelta(hours=1), now)
+    v = demand.evaluate_starts(_obs(now), _sessions(now), [(now - pd.Timedelta(hours=1), now)], now)
     assert v["fast"]["n_station_hours"] == 0 and v["slow"]["n_station_hours"] == 0
 
 
 def test_evaluate_starts_scores():
     now = pd.Timestamp("2026-11-03 12:00")
-    since = now - pd.Timedelta(hours=8)
-    v = demand.evaluate_starts(_obs(now), _sessions(now), since, now,
-                               shape={"fast": [1.0] * 96, "slow": [1.0] * 96})
-    assert v["fast"]["n_station_hours"] == 5 and "MAE" in v["fast"]
+    windows = [(now - pd.Timedelta(hours=8), now)]
+    v = demand.evaluate_starts(_obs(now), _sessions(now), windows, now)
+    f = v["fast"]
+    assert f["n_station_hours"] == 5 and f["n_hours"] == 5            # [H, H+4시간]이 구간 안에 드는 5개 시간
+    assert {"method", "formula_only", "flat", "zero"} <= set(f)
+    assert f["observed_total"] == 5                                   # 04:30 05:30 06:30 07:30 08:30 시작
 
 
-def test_recording_since_uses_latest_dense_stretch(tmp_path):
+def test_dense_windows_keep_every_stretch(tmp_path):
     import json
     (tmp_path / "sessions").mkdir()
-    runs = ["2026-11-04 02:04", "2026-11-04 02:46", "2026-11-04 04:30", "2026-11-04 04:45", "2026-11-04 05:00"]
+    runs = ["2026-11-04 02:04", "2026-11-04 02:46", "2026-11-04 04:30", "2026-11-04 04:45", "2026-11-04 05:00",
+            "2026-11-04 09:00", "2026-11-04 09:15"]
     (tmp_path / "sessions" / "meta.json").write_text(json.dumps({"runs": runs}))
-    assert demand.recording_since(tmp_path) == pd.Timestamp("2026-11-04 04:30")
+    w = demand.dense_windows(tmp_path)
+    assert w == [(pd.Timestamp("2026-11-04 04:30"), pd.Timestamp("2026-11-04 05:00")),
+                 (pd.Timestamp("2026-11-04 09:00"), pd.Timestamp("2026-11-04 09:15"))]
     (tmp_path / "sessions" / "meta.json").write_text(json.dumps({"runs": runs[:1]}))
-    assert demand.recording_since(tmp_path) is None
-    assert "note" in demand.evaluate_starts(pd.DataFrame(), pd.DataFrame(), None, pd.Timestamp("2026-11-04 06:00"))
+    assert demand.dense_windows(tmp_path) == []
+    assert "note" in demand.evaluate_starts(pd.DataFrame(), pd.DataFrame(), [], pd.Timestamp("2026-11-04 06:00"))
 
 
 def test_deconvolve_recovers_start_profile():
@@ -108,3 +113,48 @@ def test_chungbuk_shape_from_obs():
     assert len(sh["fast"]) == 96 and abs(np.mean(sh["fast"]) - 1) < 1e-3   # 평균 1
     assert demand.shape_at(sh, "fast", now) == sh["fast"][48]
     assert demand.shape_at({}, "fast", now) == 1.0
+
+
+def _window_data(now, k_status=2, sess_minutes=30, n_sess=40):
+    """4시간 구간: 급속 A는 상태상 늘 2대 충전 중, 세션은 30분짜리를 n_sess건 기록"""
+    a = now - pd.Timedelta(hours=4)
+    ts = pd.date_range(a, now, freq="15min", inclusive="left")
+    obs = pd.DataFrame({"ts": ts, "region": "43110", "statId": "A", "fast": 1, "a": 2, "c": k_status, "f": 0})
+    obs["u"] = obs["c"] / (obs["a"] + obs["c"])
+    rows = []
+    for i in range(n_sess):
+        st = a + pd.Timedelta(minutes=6 * i)
+        rows.append({"region": "43110", "statId": "A", "chgerId": f"{i % 2:02d}", "speed": "급속", "kw": 50.0,
+                     "start": st, "end": st + pd.Timedelta(minutes=sess_minutes), "minutes": float(sess_minutes)})
+    return obs, pd.DataFrame(rows), [(a, now)]
+
+
+def test_occupancy_factor_is_status_over_session_hours():
+    now = pd.Timestamp("2026-11-03 12:00")
+    obs, ses, win = _window_data(now)
+    # 상태: 2대 × 4시간 = 8 대·시간, 세션: 40건 × 0.5시간 = 20 대·시간 (구간 밖으로 넘친 부분 제외)
+    k = demand.occupancy_factor(obs, ses, win, now, "fast", min_session_hours=1)
+    done = ses[ses["end"] <= now + pd.Timedelta(minutes=10)]                    # 아직 안 끝난(미래 종료) 세션 제외
+    over = sum((min(r.end, now) - r.start for r in done.itertuples()), pd.Timedelta(0)).total_seconds() / 3600
+    assert abs(k - 8 / over) < 1e-6
+    assert demand.occupancy_factor(obs, ses, win, now, "fast") == 1.0            # 세션 시간이 적으면 보정 안 함
+    assert demand.occupancy_factor(obs, ses, [], now, "fast") == 1.0
+
+
+def test_blend_counts_with_formula():
+    now = pd.Timestamp("2026-11-03 12:00")
+    obs, ses, _ = _window_data(now)
+    win = [(now - pd.Timedelta(hours=30), now)]                                  # 충분히 긴 촘촘한 구간
+    flat = {"fast": [1.0] * 96, "slow": [1.0] * 96}
+    d, _ = demand.daily_rates(obs, ses, now, windows=win, shape=flat)
+    r = d.set_index("statId").loc["A"]
+    hours = demand.complete_hours(win, now, "fast")
+    N = sum(1 for x in ses.itertuples() if x.start.floor("h") in hours)
+    assert r["n_counted"] == N and r["exposure_h"] == len(hours)
+    expect = (N + demand.PRIOR_HOURS * r["rate_formula"] / r["occupancy_k"]) / (len(hours) + demand.PRIOR_HOURS)
+    assert abs(r["rate_h"] - expect) < 1e-9
+    # 세션을 한 번도 안 준 충전소는 공식만
+    obs2 = pd.concat([obs, obs.assign(statId="B")])
+    d2, _ = demand.daily_rates(obs2, ses, now, windows=win, shape=flat)
+    b = d2.set_index("statId").loc["B"]
+    assert b["n_counted"] == 0 and abs(b["rate_h"] - b["rate_formula"] / b["occupancy_k"]) < 1e-9

@@ -35,17 +35,23 @@ L_DAYS = 14
 SPEED_NAME = {"급속": "fast", "완속": "slow"}
 
 
-def recording_since(history_dir: str | Path, max_gap_min: int = 35) -> pd.Timestamp | None:
-    """가장 최근의 '촘촘한 수집' 구간 시작 시각. 이 뒤로 끝난 충전은 빠짐없이 기록됐다고 본다.
-    (수집 간격이 길면 그사이 한 충전기에서 끝난 충전 여러 건 중 마지막 것만 남는다)"""
+def dense_windows(history_dir: str | Path, max_gap_min: int = 35) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """세션 기록이 촘촘했던(수집 간격 ≤35분) 구간 목록 [(시작, 끝), ...]. 이 구간 안에 끝난 충전은 빠짐없이 기록됐다고 본다.
+    (수집 간격이 길면 그사이 한 충전기에서 끝난 충전 여러 건 중 마지막 것만 남는다. 수집이 한 번 끊겨도 앞 구간은 그대로 쓴다)"""
     meta = Path(history_dir) / "sessions" / "meta.json"
     runs = json.loads(meta.read_text(encoding="utf-8")).get("runs", []) if meta.exists() else []
-    if len(runs) < 2:
-        return None
-    t = pd.to_datetime(pd.Series(sorted(set(runs))))
-    gaps = t.diff() > pd.Timedelta(minutes=max_gap_min)
-    start = t[gaps].iloc[-1] if gaps.any() else t.iloc[0]
-    return start if start < t.iloc[-1] else None
+    t = pd.to_datetime(pd.Series(sorted(set(runs))), errors="coerce").dropna().reset_index(drop=True)
+    out, start = [], None
+    for i in range(1, len(t)):
+        if t[i] - t[i - 1] <= pd.Timedelta(minutes=max_gap_min):
+            start = t[i - 1] if start is None else start
+            end = t[i]
+        elif start is not None:
+            out.append((start, end))
+            start = None
+    if start is not None:
+        out.append((start, end))
+    return out
 
 
 # ── 시간대 모양 (충북, 역합성곱) ─────────────────────────────
@@ -150,26 +156,94 @@ def mean_charging(obs: pd.DataFrame, now: pd.Timestamp, days: int = L_DAYS) -> p
     return L
 
 
-def daily_rates(obs: pd.DataFrame, sessions: pd.DataFrame, now: pd.Timestamp) -> tuple[pd.DataFrame, dict]:
+LAG_H = {"fast": 3, "slow": 12}   # 시작한 충전이 끝나 기록될 때까지 기다리는 시간 (급속 p99, 완속 약 p95)
+PRIOR_HOURS = 24.0                 # 충전소 실측 건수와 공식 추정을 섞는 강도: 공식 추정을 '하루치 관측'만큼 믿음
+
+
+def complete_hours(windows: list | None, cutoff: pd.Timestamp, speed: str) -> list[pd.Timestamp]:
+    """촘촘한 기록 구간 안에서, 그 시간에 시작한 충전이 모두 끝나 기록됐다고 볼 수 있는 1시간 칸들 (cutoff 이전)"""
+    lag = pd.Timedelta(hours=1 + LAG_H[speed])
+    return [h for a, b in (windows or []) for h in pd.date_range(a.ceil("h"), b, freq="h") if h + lag <= min(b, cutoff)]
+
+
+def recordable_stations(sessions: pd.DataFrame, speed: str) -> set:
+    """세션 시각(lastTsdt/lastTedt)을 한 번이라도 준 충전소. 운영사가 이 값을 안 주면 실측 건수를 셀 수 없다."""
+    sp = sessions["speed"].map(SPEED_NAME).fillna(sessions["speed"])
+    return set(sessions.loc[sp == speed, "statId"])
+
+
+def occupancy_factor(obs: pd.DataFrame, sessions: pd.DataFrame, windows: list | None, cutoff: pd.Timestamp,
+                     speed: str, min_session_hours: float = 50.0) -> float:
+    """상태가 '충전 중'인 시간 ÷ 세션 기록(시작~종료)이 덮는 시간. 충전이 끝나도 차를 꽂아 둔 동안 '충전 중'으로 남아
+    L̄ ÷ W가 시작 건수를 부풀리므로 이 비율로 W를 늘린다. 세션을 기록하는 충전소만, cutoff 이전 촘촘한 구간에서 잰다."""
+    s = clean(sessions, cutoff)
+    s = s[s["speed"] == speed]
+    rec = set(s["statId"])
+    status_h = session_h = 0.0
+    for a, b in windows or []:
+        b = min(b, cutoff)
+        if b - a < pd.Timedelta(hours=2):
+            continue
+        o = obs[(obs["fast"] == (1 if speed == "fast" else 0)) & (obs["ts"] >= a) & (obs["ts"] < b) & obs["statId"].isin(rec)]
+        n = o["ts"].nunique()
+        if not n:
+            continue
+        status_h += o["c"].sum() * ((b - a).total_seconds() / 3600) / n
+        over = (np.minimum(s["end"], b) - np.maximum(s["start"], a)).dt.total_seconds().clip(lower=0) / 3600
+        session_h += over[s["statId"].isin(o["statId"].unique())].sum()
+    return float(status_h / session_h) if session_h >= min_session_hours else 1.0
+
+
+def daily_rates(obs: pd.DataFrame, sessions: pd.DataFrame, now: pd.Timestamp, windows: list | None = None,
+                shape: dict | None = None) -> tuple[pd.DataFrame, dict]:
+    """충전소·종류별 하루 평균 시간당 충전 시작 건수 rate_h.
+    1) 공식: L̄ ÷ (k × W)  (k: occupancy_factor, 촘촘한 기록이 없으면 1)
+    2) 촘촘한 기록 구간에서 실제로 센 시작 건수 N이 있으면 섞음 (포아송-감마):
+         rate = (N + PRIOR_HOURS × 공식) ÷ (E + PRIOR_HOURS),  E = 센 시간들의 시간대 모양 합
+       세션 시각을 한 번도 안 준 충전소는 셀 수 없으므로 공식만 쓴다.
+    now 이전 자료만 쓴다."""
     st, rg, sp, dist = durations(sessions, now)
     d = station_w(mean_charging(obs, now), st, rg, sp)
-    d["rate_h"] = np.where(d["W_min"] > 0, d["L_bar"] / (d["W_min"] / 60), np.nan)   # 하루 평균 시간당 시작 건수
+    d["rate_formula"] = np.where(d["W_min"] > 0, d["L_bar"] / (d["W_min"] / 60), np.nan)
+    d["occupancy_k"], d["n_counted"], d["exposure_h"] = 1.0, 0.0, 0.0
+    d["rate_h"] = d["rate_formula"]
+    if windows:
+        shape = shape if shape is not None else chungbuk_shape(obs, sessions, now)
+        c = clean(sessions, now)
+        for speed in ("fast", "slow"):
+            m = d["speed"] == speed
+            k = occupancy_factor(obs, sessions, windows, now, speed)
+            d.loc[m, "occupancy_k"] = k
+            d.loc[m, "rate_h"] = d.loc[m, "rate_formula"] / k
+            hours = complete_hours(windows, now, speed)
+            if not hours:
+                continue
+            E = float(sum(shape_at(shape, speed, h + pd.Timedelta(minutes=30)) for h in hours))
+            cs = c[(c["speed"] == speed) & c["start"].dt.floor("h").isin(hours)]
+            N = d.loc[m, "statId"].map(cs.groupby("statId").size()).fillna(0)
+            rec = d.loc[m, "statId"].isin(recordable_stations(sessions, speed))
+            blended = (N + PRIOR_HOURS * d.loc[m, "rate_h"]) / (E + PRIOR_HOURS)
+            d.loc[m, "rate_h"] = np.where(rec, blended, d.loc[m, "rate_h"])
+            d.loc[m, "n_counted"] = np.where(rec, N, 0.0)
+            d.loc[m, "exposure_h"] = np.where(rec, E, 0.0)
     return d, dist
 
 
 # ── 출력: schema_version 2 ───────────────────────────────────
 def build_v2(out1: dict, out2: dict, obs: pd.DataFrame, sessions: pd.DataFrame, interval_min: int = 15,
-             span_h: float = 2.0, validation: dict | None = None, shape: dict | None = None) -> dict:
+             span_h: float = 2.0, validation: dict | None = None, shape: dict | None = None,
+             windows: list | None = None) -> dict:
     """1·2시간 예측(schema 1) + 수집 관측 + 세션 기록 → 15분 구간별 이용률·기대 신규 충전 건수"""
     gen = pd.Timestamp(out1["generated_at"]).tz_localize(None)
     shape = shape if shape is not None else chungbuk_shape(obs, sessions, gen)
-    rates, dist = daily_rates(obs, sessions, gen)
+    rates, dist = daily_rates(obs, sessions, gen, windows=windows, shape=shape)
     p1 = pd.DataFrame(out1["predictions"])
     p2 = pd.DataFrame(out2["predictions"])[["station_id", "speed", "utilization"]].rename(columns={"utilization": "u2"})
     d = p1.rename(columns={"utilization": "u1", "station_id": "statId"}).merge(
         p2.rename(columns={"station_id": "statId"}), on=["statId", "speed"], how="left")
     d["u2"] = d["u2"].fillna(d["u1"])
-    d = d.merge(rates[["statId", "speed", "rate_h", "W_min", "level", "L_bar", "n"]], on=["statId", "speed"], how="left")
+    d = d.merge(rates[["statId", "speed", "rate_h", "W_min", "level", "L_bar", "n", "rate_formula", "occupancy_k",
+                       "n_counted", "exposure_h"]], on=["statId", "speed"], how="left")
     tz = out1["generated_at"][-6:]
     iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:00") + tz
     rows = []
@@ -192,7 +266,7 @@ def build_v2(out1: dict, out2: dict, obs: pd.DataFrame, sessions: pd.DataFrame, 
                          "new_sessions_p10": int(lo[i]), "new_sessions_p90": int(hi[i])})
     return {
         "schema_version": 2,
-        "model_name": out1["model_name"] + " + 신규 충전 건수 v1",
+        "model_name": out1["model_name"] + " + 신규 충전 건수 v2",
         "generated_at": out1["generated_at"],
         "simulation_start_at": out1["generated_at"],
         "interval_minutes": interval_min,
@@ -200,7 +274,10 @@ def build_v2(out1: dict, out2: dict, obs: pd.DataFrame, sessions: pd.DataFrame, 
         "demand_measure": "charging_starts",
         "method": {
             "utilization_mean": "구간 중앙 시각의 이용률. 지금 값(0시간)·1시간·2시간 예측을 직선으로 이음",
-            "expected_new_sessions": f"하루 평균 시작률(최근 {L_DAYS}일 평균 충전 중 대수 ÷ 평균 충전 시간) × 시간대 모양(충북 수집 기록을 역합성곱한 충전 시작 분포) × 구간 길이. 기대값이며 정수 실적이 아님",
+            "expected_new_sessions": (f"하루 평균 시작률 × 시간대 모양(충북 수집 기록을 역합성곱한 충전 시작 분포) × 구간 길이. 기대값이며 정수 실적이 아님. "
+                                      f"하루 평균 시작률 = 최근 {L_DAYS}일 평균 충전 중 대수 ÷ (점유 보정 × 평균 충전 시간), "
+                                      f"세션이 빠짐없이 기록된 시간대의 실제 시작 건수가 있으면 그것과 섞음 (공식 추정을 {PRIOR_HOURS:.0f}시간치 관측만큼 믿음)"),
+            "occupancy_correction": "충전이 끝나도 차를 꽂아 둔 동안 상태가 '충전 중'으로 남아, 상태 기준 충전 시간이 세션 기록보다 김. 그 비율(occupancy_k)만큼 충전 시간을 늘림",
             "new_sessions_p10_p90": "기대값을 평균으로 한 포아송 분포의 10%·90% 분위 (낮음·높음 수요 시나리오)",
             "duration_source": f"충북 충전 세션 기록(lastTsdt/lastTedt) 최근 {WINDOW_DAYS}일. 충전소 기록 {MIN_SESSIONS}건 미만이면 시·군 평균, 그다음 충북 평균",
         },
@@ -208,7 +285,10 @@ def build_v2(out1: dict, out2: dict, obs: pd.DataFrame, sessions: pd.DataFrame, 
         "start_shape_hourly": {sp: hourly(shape, sp) for sp in ("fast", "slow")},
         "stations": [{"station_id": r.statId, "speed": r.speed, "mean_duration_minutes": round(float(r.W_min), 1),
                       "duration_level": r.level, "mean_charging": round(float(r.L_bar), 3),
-                      "daily_starts": round(float(r.rate_h) * 24, 2)}
+                      "daily_starts": round(float(r.rate_h) * 24, 2),
+                      "daily_starts_formula": round(float(r.rate_formula) * 24, 2) if pd.notna(r.rate_formula) else None,
+                      "occupancy_k": round(float(r.occupancy_k), 3), "counted_starts": int(r.n_counted),
+                      "counted_hours_shape_weighted": round(float(r.exposure_h), 1)}
                      for r in d.drop_duplicates(["statId", "speed"]).itertuples() if pd.notna(r.rate_h)],
         "not_available": {"mean_energy_kwh": "공공 API에 충전량이 없음",
                           "arrivals": "대기·포기 차량은 API에 없음 (충전을 시작한 건만 셈)"},
@@ -223,33 +303,57 @@ def _interp(d: pd.DataFrame, mid: float) -> np.ndarray:
 
 
 # ── 검증 ─────────────────────────────────────────────────────
-def evaluate_starts(obs: pd.DataFrame, sessions: pd.DataFrame, since: pd.Timestamp | None, now: pd.Timestamp,
-                    shape: dict | None = None) -> dict:
-    """빠짐없이 기록된 기간의 실제 시간당 충전 시작 건수 vs 추정 (충전소·종류·1시간 단위).
-    급속은 3시간, 완속은 24시간 지난 시간대만 본다 (아직 안 끝난 충전은 기록 전이라).
-    추정의 하루 평균 시작률은 검증 시간대 이전 기록으로만 계산한다."""
-    if since is None:
-        return {"note": "15분 간격 세션 기록이 아직 시작되지 않음"}
-    s = clean(sessions, now)
-    out = {"recording_since": str(since)}
-    past = sessions[sessions["end"] < since]
-    rates, _ = daily_rates(obs, past, since)
-    shape = shape if shape is not None else chungbuk_shape(obs, past, since)
-    for speed, lag_h in (("fast", 3), ("slow", 24)):
-        lo, hi = since.ceil("h"), (now - pd.Timedelta(hours=lag_h)).floor("h")
-        if hi <= lo:
-            out[speed] = {"n_station_hours": 0, "note": f"아직 기록 부족 (기록 시작 후 {lag_h}시간 이상 지나야 함)"}
+def evaluate_starts(obs: pd.DataFrame, sessions: pd.DataFrame, windows: list | None, now: pd.Timestamp) -> dict:
+    """실제 충북 충전 시작 건수로 검증 (충전소·종류·1시간 단위, 시간 순서대로 굴려 가며).
+    촘촘한 기록 구간마다 그 구간 시작 시각 이전 자료로만 추정을 만들고, 그 구간의 '빠짐없이 기록된 시간'(complete_hours)에 맞혀 본다.
+    비교: method(공식 보정 + 실측 섞기, 실제 운영 방식) / formula_only(L̄÷W만) / flat(시간대 모양 없이) / zero(모두 0건)"""
+    if not windows:
+        return {"note": "15분 간격 세션 기록이 아직 없음"}
+    c = clean(sessions, now)
+    out = {"windows": [[str(a), str(b)] for a, b in windows]}
+    for speed in ("fast", "slow"):
+        parts = []
+        for a, b in windows:
+            hours = complete_hours([(a, b)], now, speed)
+            if not hours:
+                continue
+            past = sessions[sessions["end"] < a]
+            shape = chungbuk_shape(obs, past, a)
+            full, _ = daily_rates(obs, past, a, windows=windows, shape=shape)
+            base, _ = daily_rates(obs, past, a)
+            r = full[full["speed"] == speed][["statId", "rate_h"]].merge(
+                base[base["speed"] == speed][["statId", "rate_h"]].rename(columns={"rate_h": "rate_formula"}), on="statId")
+            r = r.dropna()
+            g = r.merge(pd.DataFrame({"hour": hours}), how="cross")
+            f = np.array([shape_at(shape, speed, h + pd.Timedelta(minutes=30)) for h in g["hour"]])
+            g["method"], g["formula_only"], g["flat"] = g["rate_h"] * f, g["rate_formula"] * f, g["rate_h"]
+            g["window"] = str(a)
+            parts.append(g)
+        if not parts:
+            out[speed] = {"n_station_hours": 0, "note": f"아직 기록 부족 (끊김 없이 {LAG_H[speed] + 1}시간 이상 기록돼야 함)"}
             continue
-        r = rates[rates["speed"] == speed].dropna(subset=["rate_h"])
-        hours = pd.date_range(lo, hi, freq="h", inclusive="left")
-        grid = r[["statId", "rate_h"]].merge(pd.DataFrame({"hour": hours}), how="cross")
-        grid["est"] = grid["rate_h"] * [shape_at(shape, speed, h + pd.Timedelta(minutes=30)) for h in grid["hour"]]
-        ss = s[(s["speed"] == speed) & (s["start"] >= lo) & (s["start"] < hi)]
-        cnt = ss.groupby([ss["statId"], ss["start"].dt.floor("h").rename("hour")]).size().rename("obs").reset_index()
-        m = grid.merge(cnt, on=["statId", "hour"], how="left").fillna({"obs": 0})
-        out[speed] = {"n_station_hours": int(len(m)), "hours": [str(lo), str(hi)],
-                      "observed_total": int(m["obs"].sum()), "estimated_total": round(float(m["est"].sum()), 1),
-                      "MAE": round(float((m["est"] - m["obs"]).abs().mean()), 4),
-                      "MAE_flat_rate": round(float((m["rate_h"] - m["obs"]).abs().mean()), 4),
-                      "MAE_zero": round(float(m["obs"].mean()), 4)}
+        g = pd.concat(parts, ignore_index=True)
+        cs = c[c["speed"] == speed]
+        cnt = cs.groupby([cs["statId"], cs["start"].dt.floor("h").rename("hour")]).size().rename("obs").reset_index()
+        m = g.merge(cnt, on=["statId", "hour"], how="left").fillna({"obs": 0})
+        y = m["obs"].to_numpy(float)
+        res = {"n_station_hours": int(len(m)), "n_hours": int(m["hour"].nunique()),
+               "hours": [str(m["hour"].min()), str(m["hour"].max())], "observed_total": int(y.sum())}
+        for k in ("method", "formula_only", "flat"):
+            p = np.clip(m[k].to_numpy(float), 1e-9, None)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                dev = 2 * np.mean(np.where(y > 0, y * np.log(np.where(y > 0, y, 1) / p), 0) - (y - p))
+            res[k] = {"estimated_total": round(float(p.sum()), 1), "poisson_deviance": round(float(dev), 4),
+                      "RMSE": round(float(np.sqrt(np.mean((p - y) ** 2))), 4), "MAE": round(float(np.mean(np.abs(p - y))), 4)}
+        res["zero"] = {"RMSE": round(float(np.sqrt(np.mean(y ** 2))), 4), "MAE": round(float(y.mean()), 4)}
+        st = m.groupby("statId")[["obs", "method"]].sum()
+        res["station_corr"] = round(float(st.corr().iloc[0, 1]), 4) if len(st) > 2 else None
+        res["by_window"] = [{"window_start": wnd, "hours": int(x["hour"].nunique()), "observed": int(x["obs"].sum()),
+                             "method": round(float(x["method"].sum()), 1), "formula_only": round(float(x["formula_only"].sum()), 1),
+                             "method_RMSE": round(float(np.sqrt(np.mean((x["method"] - x["obs"]) ** 2))), 4),
+                             "formula_only_RMSE": round(float(np.sqrt(np.mean((x["formula_only"] - x["obs"]) ** 2))), 4)}
+                            for wnd, x in m.groupby("window")]
+        hh = m.groupby(m["hour"].dt.hour)[["obs", "method"]].sum()
+        res["hour_of_day_total_error"] = round(float((hh["method"] - hh["obs"]).abs().sum() / max(hh["obs"].sum(), 1)), 4)
+        out[speed] = res
     return out

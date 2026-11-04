@@ -29,6 +29,8 @@ FEATURES = ["u0", "usable0", "fault0", "fast", "price", "horizon", "hour0", "hou
             "prev_u", "prev_gap", "recent24",
             "temp", "rain", "humid"]          # 날씨: 예측 대상 시각의 기온·강수량·습도 (utils/weather.py)
 MAX_TRAIN = 700_000              # 학습 짝이 이보다 많으면 무작위 추출 (Actions 실행 시간 제한)
+MAX_PAIRS = 2_500_000            # 짝을 만들 때부터 이 수로 제한 (메모리). 15분 수집이면 하루에 짝이 약 370만 개씩 늘어남
+NEAR_H = 2.25                    # 이 간격 이하 짝(1·2시간 검증에 쓰임)은 예산의 60%까지 우선 보존
 MODEL_NAME = "통합 예측 v3 (충북 LightGBM + 서울 사전학습 + 현재값)"
 DEFAULT_BLEND = 0.5            # (이전 버전 호환) 현재값 비율
 # 최종 예측 = a × 현재 이용률 + b × 충북 LightGBM + c × 서울 사전학습 모델 (a+b+c=1, 1시간 검증으로 정함)
@@ -160,13 +162,28 @@ def prepare(pairs: pd.DataFrame, prof: Profile, price_map: dict, asos: pd.DataFr
 # ─────────────────────────────────────────────────────────────
 # 3. 학습용 짝: 지금 상태(t0) → h시간 뒤 이용률(t)
 # ─────────────────────────────────────────────────────────────
-def make_pairs(obs: pd.DataFrame) -> pd.DataFrame:
+def _thin_run_pairs(rp: pd.DataFrame, per_run: pd.Series, max_pairs: int) -> pd.DataFrame:
+    """(시·군, t0, t) 수집 쌍을 무작위로 솎아 만들어질 짝 수가 max_pairs 안팎이 되게 한다 (재현 가능, seed 0).
+    짧은 간격(≤NEAR_H) 짝은 예산의 60%까지 그대로 두고, 나머지 예산으로 긴 간격 짝을 고르게 뽑는다."""
+    n = per_run.reindex(pd.MultiIndex.from_frame(rp[["region", "ts0"]])).to_numpy(float)
+    near = ((rp["ts_t"] - rp["ts0"]).dt.total_seconds() / 3600 <= NEAR_H).to_numpy()
+    tot_near, tot_far = n[near].sum(), n[~near].sum()
+    if tot_near + tot_far <= max_pairs:
+        return rp
+    p_near = min(1.0, 0.6 * max_pairs / max(tot_near, 1))
+    p_far = min(1.0, max(0.0, max_pairs - p_near * tot_near) / max(tot_far, 1))
+    keep = np.random.default_rng(0).random(len(rp)) < np.where(near, p_near, p_far)
+    return rp[keep]
+
+
+def make_pairs(obs: pd.DataFrame, max_pairs: int = MAX_PAIRS) -> pd.DataFrame:
     o = obs.dropna(subset=["u"]).sort_values("ts")
     runs = o[["region", "ts"]].drop_duplicates()
     # 같은 시·군 안에서 (수집 t0, 수집 t) 쌍 중 간격이 MIN_H~MAX_H인 것
     rp = runs.merge(runs, on="region", suffixes=("0", "_t"))
     h = (rp["ts_t"] - rp["ts0"]).dt.total_seconds() / 3600
-    rp = rp[(h >= MIN_H) & (h <= MAX_H)]
+    rp = rp[(h >= MIN_H) & (h <= MAX_H)].copy()
+    rp = _thin_run_pairs(rp, o.groupby(["region", "ts"]).size(), max_pairs)
     a = o.drop(columns=[]).rename(columns={"ts": "ts0", "u": "u0", "a": "a0", "c": "c0", "f": "fault0", "full": "full0"})
     b = o[["ts", "region", "statId", "fast", "u", "full"]].rename(columns={"ts": "ts_t", "u": "y", "full": "y_full"})
     pairs = rp.merge(a, on=["region", "ts0"]).merge(b, on=["region", "ts_t", "statId", "fast"])
