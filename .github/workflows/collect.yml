@@ -32,7 +32,7 @@ jobs:
           python-version: "3.12"
 
       - name: 패키지 설치
-        run: pip install pandas numpy requests python-dotenv lightgbm scikit-learn
+        run: pip install pandas numpy requests python-dotenv lightgbm scikit-learn xgboost   # xgboost: 하루 한 번 성능 평가에서 LightGBM과 비교
 
       - name: history 브랜치 준비
         run: |
