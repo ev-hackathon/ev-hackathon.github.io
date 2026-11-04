@@ -158,3 +158,21 @@ def test_blend_counts_with_formula():
     d2, _ = demand.daily_rates(obs2, ses, now, windows=win, shape=flat)
     b = d2.set_index("statId").loc["B"]
     assert b["n_counted"] == 0 and abs(b["rate_h"] - b["rate_formula"] / b["occupancy_k"]) < 1e-9
+
+
+def test_station_energy_lookup():
+    e = {"stations": {"ME1": {"kwh_per_session": 31.0}}, "fast": {"kwh_per_session": 23.4}}
+    assert demand.station_energy(e, "ME1", "fast") == (31.0, "충전소 실측")
+    assert demand.station_energy(e, "XX", "fast") == (23.4, "충북 공공급속 평균")
+    assert demand.station_energy(e, "ME1", "slow")[0] is None
+    assert demand.station_energy(None, "ME1", "fast")[0] is None
+
+
+def test_energy_file_is_sane():
+    e = demand.load_energy()
+    if e is None:
+        return
+    assert 10 < e["fast"]["kwh_per_session"] < 40 and e["fast"]["sessions"] > 10000
+    caps = {int(k): v["kwh_per_session"] for k, v in e["by_capacity_kw"].items()}
+    assert caps[50] < caps[100] <= caps[200]                     # 큰 충전기일수록 1건당 더 많이 충전
+    assert all(5 < v["kwh_per_session"] < 80 for v in e["stations"].values())

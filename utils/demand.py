@@ -229,6 +229,35 @@ def daily_rates(obs: pd.DataFrame, sessions: pd.DataFrame, now: pd.Timestamp, wi
     return d, dist
 
 
+# ── 충전 1건당 충전량 (환경부 공공급속 실측, scripts/energy_summary.py) ────────
+ENERGY_PATH = Path(__file__).resolve().parent.parent / "data" / "energy_fast_43.json"
+
+
+def load_energy() -> dict | None:
+    return json.loads(ENERGY_PATH.read_text(encoding="utf-8")) if ENERGY_PATH.exists() else None
+
+
+def station_energy(energy: dict | None, station_id: str, speed: str) -> tuple[float | None, str]:
+    """(1건당 kWh, 근거). 급속: 그 충전소 실측 → 없으면 충북 공공급속 평균. 완속: 실측 없음."""
+    if not energy or speed != "fast":
+        return None, "실측 없음"
+    st = energy["stations"].get(station_id)
+    if st:
+        return st["kwh_per_session"], "충전소 실측"
+    return energy["fast"]["kwh_per_session"], "충북 공공급속 평균"
+
+
+def energy_block(energy: dict | None) -> dict | None:
+    if not energy:
+        return None
+    return {"source": energy["source"], "period": energy["period"], "method": energy["method"],
+            "fast": energy["fast"], "by_capacity_kw": energy["by_capacity_kw"],
+            "slow": {"kwh_per_session": None, "note": "완속은 실측 자료 없음. 합성데이터 표본 참고값: "
+                     + (f"평균 {energy['synthetic_check']['slow']['kwh_mean']}kWh (n={energy['synthetic_check']['slow']['n']}, 가상 자료)"
+                        if energy.get("synthetic_check") else "없음")},
+            "synthetic_check": energy.get("synthetic_check")}
+
+
 # ── 출력: schema_version 2 ───────────────────────────────────
 def build_v2(out1: dict, out2: dict, obs: pd.DataFrame, sessions: pd.DataFrame, interval_min: int = 15,
              span_h: float = 2.0, validation: dict | None = None, shape: dict | None = None,
@@ -236,6 +265,7 @@ def build_v2(out1: dict, out2: dict, obs: pd.DataFrame, sessions: pd.DataFrame, 
     """1·2시간 예측(schema 1) + 수집 관측 + 세션 기록 → 15분 구간별 이용률·기대 신규 충전 건수"""
     gen = pd.Timestamp(out1["generated_at"]).tz_localize(None)
     shape = shape if shape is not None else chungbuk_shape(obs, sessions, gen)
+    energy = load_energy()
     rates, dist = daily_rates(obs, sessions, gen, windows=windows, shape=shape)
     p1 = pd.DataFrame(out1["predictions"])
     p2 = pd.DataFrame(out2["predictions"])[["station_id", "speed", "utilization"]].rename(columns={"utilization": "u2"})
@@ -288,9 +318,12 @@ def build_v2(out1: dict, out2: dict, obs: pd.DataFrame, sessions: pd.DataFrame, 
                       "daily_starts": round(float(r.rate_h) * 24, 2),
                       "daily_starts_formula": round(float(r.rate_formula) * 24, 2) if pd.notna(r.rate_formula) else None,
                       "occupancy_k": round(float(r.occupancy_k), 3), "counted_starts": int(r.n_counted),
-                      "counted_hours_shape_weighted": round(float(r.exposure_h), 1)}
+                      "counted_hours_shape_weighted": round(float(r.exposure_h), 1),
+                      "mean_energy_kwh": station_energy(energy, r.statId, r.speed)[0],
+                      "energy_source": station_energy(energy, r.statId, r.speed)[1]}
                      for r in d.drop_duplicates(["statId", "speed"]).itertuples() if pd.notna(r.rate_h)],
-        "not_available": {"mean_energy_kwh": "공공 API에 충전량이 없음",
+        "energy_kwh": energy_block(energy),
+        "not_available": {"slow_energy_kwh": "완속 충전량 실측 자료 없음 (energy_kwh.slow 참고)",
                           "arrivals": "대기·포기 차량은 API에 없음 (충전을 시작한 건만 셈)"},
         "validation": validation or {},
         "predictions": rows,
