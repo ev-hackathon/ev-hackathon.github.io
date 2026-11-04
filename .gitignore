@@ -24,3 +24,8 @@ server.log
 tunnel.log
 .pids
 tunnel_history.log
+
+# Local verification dependencies and generated static preview
+.test-deps/
+_site/
+docs/data/

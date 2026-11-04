@@ -31,6 +31,7 @@ from utils.logic import KST
 def build_site(history_dir: Path, out: Path, *, collected: dict | None, error: str | None, now: datetime) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     (out / "index.html").write_text(build_web.build(), encoding="utf-8")
+    build_web.copy_forecast(out)
     (out / ".nojekyll").write_text("", encoding="utf-8")
     data_dir = out / "data" / "history"
     data_dir.mkdir(parents=True, exist_ok=True)
