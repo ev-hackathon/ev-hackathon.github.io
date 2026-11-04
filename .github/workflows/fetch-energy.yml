@@ -1,0 +1,21 @@
+name: 충전량 자료 받기
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - run: python -m scripts.fetch_energy --out energy
+        env:
+          EV_API_KEY: ${{ secrets.EV_API_KEY }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: energy
+          path: energy/
