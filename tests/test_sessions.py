@@ -20,3 +20,24 @@ def test_new_sessions_recorded_once(tmp_path):
 
 def test_future_end_is_dropped(tmp_path):
     assert sessions.append("청주시", [row("A", "01", "20991104100000", "20991104104500")], tmp_path) == 0
+
+
+def test_export_sessions_concatenates_recent_days(tmp_path):
+    from datetime import datetime
+    from scripts import publish_static
+    from utils import logic
+    hist = tmp_path / "history"
+    for day, rows in (("2026-09-01", ["ZZ1,01,급속,50.0,2026-09-01 10:00:00,2026-09-01 10:30:00,30.0"]),   # 30일보다 오래됨
+                      ("2026-11-03", ["A,01,급속,50.0,2026-11-03 10:00:00,2026-11-03 10:30:00,30.0"]),
+                      ("2026-11-04", ["B,02,완속,7.0,2026-11-04 01:00:00,2026-11-04 05:00:00,240.0",
+                                      "C,01,급속,100.0,2026-11-04 09:00:00,2026-11-04 09:20:00,20.0"])):
+        d = hist / "sessions" / day
+        d.mkdir(parents=True)
+        (d / "43110.csv").write_text("statId,chgerId,speed,kw,start,end,minutes\n" + "\n".join(rows) + "\n", encoding="utf-8")
+    out = tmp_path / "_site"
+    idx = publish_static.export_sessions(hist, out, datetime(2026, 11, 5, 9, 0, tzinfo=logic.KST))
+    text = (out / "data" / "sessions" / "43110.csv").read_text(encoding="utf-8").splitlines()
+    assert text[0] == "statId,chgerId,speed,kw,start,end,minutes"     # 헤더 한 번만
+    assert [x.split(",")[0] for x in text[1:]] == ["A", "B", "C"]     # 오래된 날짜 제외, 날짜 순
+    assert idx["regions"]["43110"]["rows"] == 3 and len(idx["regions"]["43110"]["files"]) == 2
+    assert (out / "data" / "sessions" / "index.json").exists()
