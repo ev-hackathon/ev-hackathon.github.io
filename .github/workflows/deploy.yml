@@ -126,33 +126,48 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url || steps.retry.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.retry.outputs.page_url || steps.retry2.outputs.page_url }}
     steps:
+      - uses: actions/checkout@v4   # scripts/pages_unstick.sh
+        with:
+          sparse-checkout: scripts
+
+      # 한 번에 5분까지 기다림 (기본 10분). GitHub 쪽에서 멈추면 빨리 포기하고 아래에서 정리 후 다시 시도
       - id: deployment
         uses: actions/deploy-pages@v4
         continue-on-error: true
+        with:
+          timeout: 300000
 
       # GitHub 쪽에서 이전 배포가 '진행 중'으로 멈추면 새 배포가 모두 거절됨 ("Please cancel <sha> first").
-      # 2026-11-05 새벽 30분 넘게 사이트가 멈춰 추가. 배포가 실패했을 때만, 다른 커밋의 끝나지 않은 Pages 배포를 취소하고 한 번 더 시도.
-      - name: 멈춘 이전 배포 취소
+      # 2026-11-05 새벽 30분 넘게 사이트가 멈춰 추가. 배포가 실패했을 때만 끝나지 않은 Pages 배포를 취소하고 다시 시도.
+      - name: 멈춘 배포 정리
         if: steps.deployment.outcome == 'failure'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          for sha in $(gh api "repos/$GITHUB_REPOSITORY/deployments?environment=github-pages&per_page=10" --jq '.[].sha' | awk '!seen[$0]++'); do
-            [ "$sha" = "$GITHUB_SHA" ] && continue
-            st=$(gh api "repos/$GITHUB_REPOSITORY/pages/deployments/$sha" --jq .status 2>/dev/null || echo unknown)
-            case "$st" in
-              succeed|deployment_cancelled|deployment_failed|deployment_content_failed|deployment_lost|deployment_attempt_error|unknown) ;;
-              *) echo "멈춘 배포 취소: $sha ($st)"
-                 gh api -X POST "repos/$GITHUB_REPOSITORY/pages/deployments/$sha/cancel" || echo "::warning::$sha 취소 실패" ;;
-            esac
-          done
+        run: bash scripts/pages_unstick.sh
 
       - id: retry
         if: steps.deployment.outcome == 'failure'
         uses: actions/deploy-pages@v4
+        continue-on-error: true
+        with:
+          timeout: 300000
+
+      - name: 한 번 더 정리 후 마지막 시도
+        if: steps.retry.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sleep 60
+          bash scripts/pages_unstick.sh
+
+      - id: retry2
+        if: steps.retry.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        with:
+          timeout: 300000
 
       # 사이트는 이전 기록으로 배포하되, 수집이 실패했으면 Actions에 빨간 표시로 알림
       - name: 수집 실패 알림

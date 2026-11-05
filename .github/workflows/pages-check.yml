@@ -1,0 +1,18 @@
+# Pages 배포 상태 점검 (수동 실행): 최근 배포 상태와 '멈춘 배포 취소' 권한을 확인만 하고 아무것도 바꾸지 않음
+name: Pages 배포 점검
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  deployments: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/pages_unstick.sh --check-permission
