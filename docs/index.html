@@ -1185,24 +1185,39 @@ function drawSelection() {
   if (s) selLayer.addLayer(L.circleMarker([s.lat, s.lng], { renderer: canvas, radius: s.r + 4, color: C.ink, weight: 2, fill: false, interactive: false }));
 }
 
+// 대체 거점 화살표 크기: 확대(14 이상)에서는 원래 크기, 시 전체를 보는 축소(11 이하)에서는 절반 — 많은 화살표가 지도를 덮지 않게
+var linkLines = [];   // var: drawMap이 이 줄보다 먼저 불려도 안전하게
+function linkScale() { const z = map.getZoom(); return z >= 14 ? 1 : z <= 11 ? 0.5 : 0.5 + (z - 11) / 6; }
+function applyLinkScale() {
+  const k = linkScale();
+  map.getContainer().style.setProperty("--as", k);   // 화살촉은 CSS 변수로 (다시 그리지 않음)
+  for (const [casing, dash] of linkLines) {
+    casing.setStyle({ weight: 6.5 * k });
+    dash.setStyle({ weight: Math.max(1.4, 3 * k), dashArray: `${(7 * k).toFixed(1)} ${(5 * k).toFixed(1)}` });
+  }
+}
+map.on("zoomend", applyLinkScale);
+
 function drawMap() {
   const list = state.view.list;
   for (const s of list) s.r = Math.min(3.6 + 1.3 * Math.sqrt(s.total), 9.5);
   const order = { 미확인: 0, 불가: 1, 보통: 2, 여유: 3, 혼잡: 4 };
   const shown = list.filter(s => !state.hidden.has(s.status)).sort((a, b) => order[a.status] - order[b.status]);
-  linkLayer.clearLayers(); dotLayer.clearLayers(); dotIndex.clear();
+  linkLayer.clearLayers(); dotLayer.clearLayers(); dotIndex.clear(); linkLines = [];
   const links = state.p.rad > 0 ? shown.filter(s => s.alt && !state.hidden.has(s.alt.st.status)) : [];
   for (const s of links) {
     const a = [s.lat, s.lng], b = [s.alt.st.lat, s.alt.st.lng];
     // 흰 테두리 위에 진한 점선: 지도 배경·점 색과 겹쳐도 잘 보이게
-    linkLayer.addLayer(L.polyline([a, b], { renderer: canvas, color: "#fff", weight: 6.5, opacity: 0.95, lineCap: "round", interactive: false }));
-    linkLayer.addLayer(L.polyline([a, b], { renderer: canvas, color: C.ink, weight: 3, dashArray: "7 5", opacity: 1, lineCap: "butt", interactive: false }));
+    const casing = L.polyline([a, b], { renderer: canvas, color: "#fff", weight: 6.5, opacity: 0.95, lineCap: "round", interactive: false });
+    const dash = L.polyline([a, b], { renderer: canvas, color: C.ink, weight: 3, dashArray: "7 5", opacity: 1, lineCap: "butt", interactive: false });
+    linkLayer.addLayer(casing); linkLayer.addLayer(dash); linkLines.push([casing, dash]);
     const p1 = map.latLngToLayerPoint(a), p2 = map.latLngToLayerPoint(b);   // 메르카토르에서는 확대해도 각도가 같음
     const deg = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
-    const back = (s.alt.st.r || 6) + 18;
+    const gap = (s.alt.st.r || 6) + 4;   // 화살촉 끝이 도착 점 테두리에서 4px 떨어지게 (크기가 바뀌어도 같은 간격)
     linkLayer.addLayer(L.marker(b, { interactive: false, keyboard: false, icon: L.divIcon({ className: "", iconSize: [0, 0],
-      html: `<svg class="arrow-head" width="18" height="18" viewBox="-2 -2 18 18" style="transform:rotate(${deg}deg) translate(-${back}px,-9px)"><path d="M0,0 L14,7 L0,14z"/></svg>` }) }));
+      html: `<svg class="arrow-head" width="18" height="18" viewBox="-2 -2 18 18" style="transform:rotate(${deg}deg) scale(var(--as,1)) translate(calc(-1px * (${gap} / var(--as,1) + 14)),-9px)"><path d="M0,0 L14,7 L0,14z"/></svg>` }) }));
   }
+  applyLinkScale();
   for (const s of shown) {
     const m = L.circleMarker([s.lat, s.lng], { renderer: canvas, radius: s.r, ...DOT_STYLE[s.status] })
       .bindTooltip(`<b>${esc(s.name)}</b><br>${STATUS_LABEL[s.status]}${s.price != null ? ", " + s.price.toFixed(1) + "원/kWh" : ""}`,
