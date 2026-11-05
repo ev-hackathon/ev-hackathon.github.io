@@ -7,7 +7,8 @@
 
 **공개 사이트: https://ev-hackathon.github.io/** (GitHub Pages, 15분마다 실제 데이터로 갱신)
 **AI 예측 결과(누구나 내려받기 가능)**: [1시간 후](https://ev-hackathon.github.io/data/forecast.json) ·
-[2시간 후](https://ev-hackathon.github.io/data/forecast_2h.json) · [15분 단위 충전 수요](https://ev-hackathon.github.io/data/forecast_v2.json)
+[2시간 후](https://ev-hackathon.github.io/data/forecast_2h.json) · [15분 단위 충전 수요](https://ev-hackathon.github.io/data/forecast_v2.json) ·
+[충전 세션 원자료](https://ev-hackathon.github.io/data/sessions/index.json)
 — 형식은 [docs/forecast-io.md](docs/forecast-io.md), 모델과 성능은 [docs/forecast-report.md](docs/forecast-report.md)
 
 | | 공개 사이트 (GitHub Pages) | 로컬 서버 (`server.py`) | 대시보드 앱 (`main.py`) |

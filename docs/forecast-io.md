@@ -162,3 +162,35 @@
 - 충전건별 충전량 합성데이터(가상 자료) 충북 표본도 급속 평균 22.6kWh로 비슷합니다. 완속은 실측이 없고 합성데이터 참고값만 있습니다(평균 15.8kWh, 291건).
 - 서울 2025 충전 이력에서 '충전 시간 → 충전량' 관계를 배워 충북 급속 세션 시간에 적용해도 중앙값 22.8kWh로 거의 같았습니다.
 - 환경부 공공급속 충전기만이라 민간 운영사 충전기와는 다를 수 있습니다. 우리 급속 충전소 중 307곳이 이 자료와 일치해 충전소별 값을 씁니다.
+
+## 6. 충전 세션 원자료 — `data/sessions/{시·군 코드}.csv`
+
+끝난 충전 세션(충전기별 시작·종료 시각)을 시·군별 CSV 하나로 공개합니다. 30분마다 갱신되고, 끝난 날짜 기준 최근 30일치입니다.
+
+| 파일 | 주소 |
+|---|---|
+| 시·군별 세션 | `https://ev-hackathon.github.io/data/sessions/43110.csv` (청주시. 코드는 `config.REGIONS`) |
+| 목록 | `https://ev-hackathon.github.io/data/sessions/index.json` (시·군별 행 수, 원본 파일 목록, 기록 커밋) |
+
+- 열: `statId,chgerId,speed,kw,start,end,minutes` — history 브랜치 `history/sessions/{날짜}/{코드}.csv`와 똑같습니다.
+- GitHub API(`api.github.com`)는 로그인 없이 쓰면 **접속한 곳(IP)마다 1시간에 60번**까지만 됩니다. 발표장처럼 같은 와이파이에서 여러 명이 열면 막힐 수 있으니, 브라우저에서 세션 자료를 읽을 때는 이 주소를 쓰세요(호출 제한 없음, CORS 허용).
+- 2026-11-04 이전 기록은 충전기마다 마지막 1건만 있습니다.
+
+B조 `web/session-timing.js`의 `createClient` 안 `load` 함수를 아래로 바꾸면 GitHub API 없이 같은 자료를 읽습니다 (`index()`는 더 쓰지 않음, `plan`·`csv`는 그대로):
+
+```js
+async function load(stations, region, asOf = now()) {
+  if (!/^\d{5}$/.test(region)) throw new Error('세션 분석 지역을 확인하세요.');
+  const base = 'https://ev-hackathon.github.io/data/sessions/';
+  const key = region + ':' + Math.floor(asOf / 900000);          // 15분마다 새로 받음
+  if (!regions.has(key)) regions.set(key, (async () => {
+    const idx = await json(base + 'index.json');
+    const r = await fetcher(base + region + '.csv', { credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(20000) });
+    if (!r.ok) throw new Error(`세션 파일 응답 ${r.status}`);
+    return { rows: csv(await r.text()), idx };
+  })().catch(e => { regions.delete(key); throw e; }));
+  const data = await regions.get(key);
+  return plan(data.rows, stations, region, asOf, { repository: base, commit: data.idx.history_commit,
+    files: data.idx.regions[region]?.files || [], fetchedAt: new Date(now()).toISOString() });
+}
+```
